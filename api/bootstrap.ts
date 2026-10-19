@@ -12,8 +12,12 @@ export async function bootstrapSystemAdmin() {
   
   try {
     await ensureSystemAdmin();
-    await ensureDemoUser(); // <--- LLAMAMOS A LA NUEVA FUNCIÓN AQUÍ
-    await seedAllDataIfEmpty();
+    if (process.env.SEED_DEMO === 'true') {
+      await ensureDemoUser();
+      await seedAllDataIfEmpty();
+    } else {
+      console.log('[BOOTSTRAP] Skipping demo user and demo data because SEED_DEMO is not true');
+    }
     console.log('[BOOTSTRAP] Bootstrap completed successfully!');
   } catch (error) {
     console.error('[BOOTSTRAP] CRITICAL ERROR during bootstrap:', error);
@@ -28,9 +32,13 @@ async function ensureSystemAdmin() {
     
     if (existingAdmin.length === 0) {
       console.log('[BOOTSTRAP] System admin not found, creating...');
-      
-      // 🚨 SEGURIDAD: Cambiada la contraseña a una genérica para GitHub
-      const hashedPassword = await bcrypt.hash('AdminFlowOps2024!', SALT_ROUNDS);
+
+      const plainPassword = process.env.SYSTEM_ADMIN_PASSWORD;
+      if (!plainPassword) {
+        throw new Error('SYSTEM_ADMIN_PASSWORD must be set to create the system admin');
+      }
+
+      const hashedPassword = await bcrypt.hash(plainPassword, SALT_ROUNDS);
       
       await db.insert(users).values({
         name: 'Angel Gonzalez',
@@ -56,14 +64,19 @@ async function ensureSystemAdmin() {
 // === NUEVA FUNCIÓN PARA EL USUARIO DEMO ===
 async function ensureDemoUser() {
   console.log('[BOOTSTRAP] Checking for demo user...');
-  
+
+  const plainPassword = process.env.DEMO_USER_PASSWORD;
+  if (!plainPassword) {
+    throw new Error('DEMO_USER_PASSWORD must be set when SEED_DEMO=true');
+  }
+
   try {
     const existingDemo = await db.select().from(users).where(eq(users.username, 'demo')).limit(1);
     
     if (existingDemo.length === 0) {
       console.log('[BOOTSTRAP] Demo user not found, creating...');
-      
-      const hashedPassword = await bcrypt.hash('demo123', SALT_ROUNDS);
+
+      const hashedPassword = await bcrypt.hash(plainPassword, SALT_ROUNDS);
       
       await db.insert(users).values({
         name: 'Guest User (Demo)',

@@ -8,6 +8,11 @@ import { registerRoutes } from "./routes";
 import { bootstrapSystemAdmin } from "./bootstrap";
 import { serveStatic } from "./static";
 
+const sessionSecret = process.env.SESSION_SECRET;
+if (!sessionSecret) {
+  throw new Error("SESSION_SECRET must be set");
+}
+
 // Inicializa Express
 const app = express();
 app.set("trust proxy", 1);
@@ -22,7 +27,7 @@ app.use(
       tableName: "session",
       createTableIfMissing: true,
     }),
-    secret: process.env.SESSION_SECRET || "flowops-secret-key-change-in-production",
+    secret: sessionSecret,
     resave: false,
     saveUninitialized: false,
     cookie: {
