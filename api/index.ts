@@ -81,7 +81,8 @@ app.use((req, res, next) => {
   }
 
   // 3. ARRANCAR EL SERVIDOR (CORREGIDO)
-  // Render nos da el puerto en process.env.PORT (usualmente 10000)
+  // Render sets PORT. Locally it comes from .env, otherwise 5000.
+  // The Vite dev server listens on 5173 and proxies to this same port.
   const PORT = process.env.PORT || 5000;
   
   // CORRECCIÓN: Como registerRoutes no devuelve nada, usamos 'app' directamente.
