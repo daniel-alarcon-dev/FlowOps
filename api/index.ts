@@ -1,9 +1,10 @@
 import path from 'path';
 import "dotenv/config";
-import express, { Request, Response, NextFunction } from "express";
+import express from "express";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
+import { catchAsyncRouteErrors, errorHandler } from "./errors";
 import { registerRoutes } from "./routes";
 import { bootstrapSystemAdmin } from "./bootstrap";
 import { serveStatic } from "./static";
@@ -64,16 +65,11 @@ app.use((req, res, next) => {
   // 1. Crear datos iniciales (Admin)
   await bootstrapSystemAdmin();
 
-  // 2. Registrar rutas (y obtener el servidor HTTP si existe)
-  // IMPORTANTE: registerRoutes suele devolver el servidor HTTP para websockets
-  const server = await registerRoutes(app);
+  // 2. Registrar rutas. Async rejections are forwarded before the handlers exist.
+  catchAsyncRouteErrors(app);
+  await registerRoutes(app);
 
-  // --- Error handler ---
-  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-    const status = err.status || err.statusCode || 500;
-    const message = err.message || "Internal Server Error";
-    res.status(status).json({ message });
-  });
+  app.use(errorHandler);
 
   // --- Servir frontend estático solo en producción ---
   if (process.env.NODE_ENV === "production") {
