@@ -68,8 +68,9 @@ En el servicio de Render (sin redesplegar hasta que las variables estén puestas
 
 1. **`SENTRY_DSN`** — DSN de `flowops-api`. La API lo lee al arrancar el proceso (`npm start` ya carga el hook `--import @sentry/node/import`).
 2. **`VITE_SENTRY_DSN`** — DSN de `flowops`. Vite lo incrusta en el bundle durante `vite build`. Tiene que existir en el entorno de build. Ponerla solo en runtime no llega al navegador. En Render, una variable del servicio está disponible en el build y en runtime si se define antes del deploy.
+3. **`SENTRY_AUTH_TOKEN`** — secreto de build para subir los source maps del frontend a `flowops`. Si falta, `vite build` termina bien y no sube mapas. No va en el repositorio; solo en el entorno de build de Render.
 
-Los DSN van solo en variables de entorno. `.env.example` tiene placeholders falsos.
+Los DSN y el token van solo en variables de entorno. `.env.example` tiene placeholders falsos.
 
 ## 🔒 Seguridad
 - Las contraseñas en la base de datos están encriptadas utilizando `bcrypt` (Salt Rounds: 10).

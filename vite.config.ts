@@ -1,5 +1,6 @@
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
+import { sentryVitePlugin } from "@sentry/vite-plugin";
 import tailwindcss from "@tailwindcss/vite";
 import fs from "fs";
 import path from "path";
@@ -31,7 +32,7 @@ function readApiPort(envPath: string): string {
 // Fallback 5000 must match api/index.ts when PORT is unset.
 const apiOrigin = `http://127.0.0.1:${readApiPort(path.resolve(__dirname, ".env"))}`;
 
-export default defineConfig(({ mode }) => {
+export default defineConfig(({ command, mode }) => {
   // Vite's root is `client/`, so it does not load the repo-root .env.
   // Pull only VITE_SENTRY_* so NODE_ENV and server secrets stay out of this process.
   const sentryEnv = loadEnv(mode, __dirname, "VITE_SENTRY_");
@@ -40,10 +41,26 @@ export default defineConfig(({ mode }) => {
     process.env.VITE_SENTRY_DSN = viteSentryDsn;
   }
 
+  // Token stays in the build environment. Never read it from a committed file.
+  const sentryAuthToken = process.env.SENTRY_AUTH_TOKEN?.trim();
+  const uploadSourceMaps = command === "build" && mode === "production" && Boolean(sentryAuthToken);
+
   return {
     plugins: [
       react(),
       tailwindcss(),
+      // Last, so it sees the finished client bundle. Disabled unless this is a
+      // production build with SENTRY_AUTH_TOKEN, so local and CI builds still pass.
+      sentryVitePlugin({
+        org: "daniel-alarcon-rodriguez",
+        project: "flowops",
+        authToken: sentryAuthToken,
+        url: "https://de.sentry.io",
+        disable: !uploadSourceMaps,
+        sourcemaps: {
+          filesToDeleteAfterUpload: ["./dist/public/**/*.map"],
+        },
+      }),
     ],
     resolve: {
       alias: {
@@ -56,6 +73,8 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: path.resolve(__dirname, "dist/public"),
       emptyOutDir: true,
+      // Hidden maps are uploaded and then deleted. Without a token, emit none.
+      sourcemap: uploadSourceMaps ? "hidden" : false,
     },
     server: {
       host: "0.0.0.0",
