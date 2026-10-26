@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import fs from "fs";
@@ -31,30 +31,40 @@ function readApiPort(envPath: string): string {
 // Fallback 5000 must match api/index.ts when PORT is unset.
 const apiOrigin = `http://127.0.0.1:${readApiPort(path.resolve(__dirname, ".env"))}`;
 
-export default defineConfig({
-  plugins: [
-    react(),
-    tailwindcss(),
-  ],
-  resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "client", "src"),
-      "@shared": path.resolve(__dirname, "shared"),
-      "@assets": path.resolve(__dirname, "attached_assets"),
+export default defineConfig(({ mode }) => {
+  // Vite's root is `client/`, so it does not load the repo-root .env.
+  // Pull only VITE_SENTRY_* so NODE_ENV and server secrets stay out of this process.
+  const sentryEnv = loadEnv(mode, __dirname, "VITE_SENTRY_");
+  const viteSentryDsn = process.env.VITE_SENTRY_DSN?.trim() || sentryEnv.VITE_SENTRY_DSN?.trim();
+  if (viteSentryDsn) {
+    process.env.VITE_SENTRY_DSN = viteSentryDsn;
+  }
+
+  return {
+    plugins: [
+      react(),
+      tailwindcss(),
+    ],
+    resolve: {
+      alias: {
+        "@": path.resolve(__dirname, "client", "src"),
+        "@shared": path.resolve(__dirname, "shared"),
+        "@assets": path.resolve(__dirname, "attached_assets"),
+      },
     },
-  },
-  root: path.resolve(__dirname, "client"),
-  build: {
-    outDir: path.resolve(__dirname, "dist/public"),
-    emptyOutDir: true,
-  },
-  server: {
-    host: "0.0.0.0",
-    port: 5173,
-    allowedHosts: true,
-    proxy: {
-      "/api": { target: apiOrigin, changeOrigin: true },
-      "/uploads": { target: apiOrigin, changeOrigin: true },
+    root: path.resolve(__dirname, "client"),
+    build: {
+      outDir: path.resolve(__dirname, "dist/public"),
+      emptyOutDir: true,
     },
-  },
+    server: {
+      host: "0.0.0.0",
+      port: 5173,
+      allowedHosts: true,
+      proxy: {
+        "/api": { target: apiOrigin, changeOrigin: true },
+        "/uploads": { target: apiOrigin, changeOrigin: true },
+      },
+    },
+  };
 });

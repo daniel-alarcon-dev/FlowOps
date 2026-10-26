@@ -60,6 +60,17 @@ El proyecto sigue una arquitectura Cliente-Servidor separada pero empaquetada en
 
 ---
 
+## Monitoreo de errores (Sentry)
+
+El frontend (`@sentry/react`, proyecto `flowops`) y la API (`@sentry/node`, proyecto `flowops-api`) envían errores y trazas solo si hay un DSN. Si la variable está vacía, Sentry no se inicializa y la app arranca igual.
+
+En el servicio de Render (sin redesplegar hasta que las variables estén puestas):
+
+1. **`SENTRY_DSN`** — DSN de `flowops-api`. La API lo lee al arrancar el proceso (`npm start` ya carga el hook `--import @sentry/node/import`).
+2. **`VITE_SENTRY_DSN`** — DSN de `flowops`. Vite lo incrusta en el bundle durante `vite build`. Tiene que existir en el entorno de build. Ponerla solo en runtime no llega al navegador. En Render, una variable del servicio está disponible en el build y en runtime si se define antes del deploy.
+
+Los DSN van solo en variables de entorno. `.env.example` tiene placeholders falsos.
+
 ## 🔒 Seguridad
 - Las contraseñas en la base de datos están encriptadas utilizando `bcrypt` (Salt Rounds: 10).
 - La gestión de sesiones se realiza a través de cookies `httpOnly` respaldadas por PostgreSQL (`connect-pg-simple`), previniendo ataques XSS.

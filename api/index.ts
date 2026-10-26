@@ -1,5 +1,6 @@
 import path from 'path';
 import "dotenv/config";
+import * as Sentry from "@sentry/node";
 import express from "express";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
@@ -8,6 +9,20 @@ import { catchAsyncRouteErrors, errorHandler } from "./errors";
 import { registerRoutes } from "./routes";
 import { bootstrapSystemAdmin } from "./bootstrap";
 import { serveStatic } from "./static";
+
+// Express errors and traces are captured by the default expressIntegration.
+// That integration needs the diagnostics-channel hook installed before Express
+// loads, which `npm run dev` / `npm start` do via `--import @sentry/node/import`.
+// setupExpressErrorHandler is deprecated in @sentry/node 11; do not add it back.
+const sentryDsn = process.env.SENTRY_DSN?.trim();
+if (sentryDsn) {
+  Sentry.init({
+    dsn: sentryDsn,
+    environment: process.env.NODE_ENV || "development",
+    // Capture every trace in this first setup. Lower this if production volume grows.
+    tracesSampleRate: 1.0,
+  });
+}
 
 const sessionSecret = process.env.SESSION_SECRET;
 if (!sessionSecret) {
