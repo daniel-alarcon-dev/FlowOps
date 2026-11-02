@@ -91,7 +91,9 @@ function Router() {
         {() => <PrivateRoute component={Schedule} categoryColor="#3B82F6" />}
       </Route>
 
-      <Route path="/settings" component={Settings} />
+      <Route path="/settings">
+        {() => <PrivateRoute component={Settings} />}
+      </Route>
 
       {/* 👇 11. NUEVA RUTA: WEEKLY TASKS (Morado) */}
       <Route path="/tasks">
