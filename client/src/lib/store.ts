@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { api } from './api';
+import { queryClient } from './queryClient';
 
 export type Status = 'OK' | 'LOW' | 'OUT';
 export type EquipmentStatus = 'Working' | 'Attention' | 'Broken';
@@ -112,7 +113,7 @@ interface FlowState {
 
 export const useStore = create<FlowState>()(
   persist(
-    (set) => ({
+    (set, _get, store) => ({
       currentUser: null,
       
       setCurrentUser: (user) => set({ currentUser: user }),
@@ -123,7 +124,14 @@ export const useStore = create<FlowState>()(
         } catch (error) {
           console.error('Logout error:', error);
         } finally {
+          queryClient.clear();
           set({ currentUser: null });
+          try {
+            store.persist.clearStorage();
+            localStorage.clear();
+          } catch (error) {
+            console.error('Failed to clear local session data:', error);
+          }
         }
       },
     }),

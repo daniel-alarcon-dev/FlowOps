@@ -18,9 +18,10 @@ export default function Settings() {
   const handleLogout = async () => {
     try {
       await logout();
-      setLocation('/auth');
     } catch (error) {
       console.error("Logout failed", error);
+    } finally {
+      setLocation('/login');
     }
   };
 
