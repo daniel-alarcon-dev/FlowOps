@@ -26,9 +26,11 @@ import {
 import { z } from "zod";
 import { db } from "./db";
 import { eq, and, asc, sql } from "drizzle-orm";
-import { users, inventory, equipment, checklistItems, weeklyTasks, taskCompletions, chatMessages, timelineEvents, menuItems, ingredients, notifications } from "@shared/schema";
+import { users, inventory, equipment, checklistItems, weeklyTasks, taskCompletions, chatMessages, timelineEvents, menuItems, ingredients, notifications, type User } from "@shared/schema";
 
 const SALT_ROUNDS = 10;
+
+type PublicUser = Omit<User, "password">;
 
 interface SessionUser {
   id: string;
@@ -40,8 +42,14 @@ interface SessionUser {
 
 declare module 'express-session' {
   interface SessionData {
-    user?: SessionUser;
+    user?: PublicUser;
   }
+}
+
+/** User shape safe for JSON responses and the session store. The password hash stays on the server. */
+function toPublicUser(user: User): PublicUser {
+  const { password: _password, ...publicUser } = user;
+  return publicUser;
 }
 
 function isSystemAdminUser(user: SessionUser | undefined): boolean {
@@ -101,8 +109,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         }
       } catch {}
 
-      const { password, ...userWithoutPassword } = user;
-      res.status(201).json(userWithoutPassword);
+      res.status(201).json(toPublicUser(user));
     } catch (error) {
       if (error instanceof z.ZodError) return res.status(400).json({ errors: error.errors });
       res.status(500).json({ message: "Registration failed" });
@@ -124,16 +131,9 @@ export async function registerRoutes(app: Express): Promise<void> {
       if (user.status === 'pending') return res.status(403).json({ message: "Account pending approval" });
       if (user.status === 'removed') return res.status(403).json({ message: "Account deactivated" });
 
-      req.session.user = {
-        id: user.id,
-        name: user.name,
-        role: user.role,
-        establishment: user.establishment,
-        isSystemAdmin: user.isSystemAdmin
-      };
-
-      const { password: _, ...userWithoutPassword } = user;
-      res.json(userWithoutPassword);
+      const publicUser = toPublicUser(user);
+      req.session.user = publicUser;
+      res.json(publicUser);
     } catch {
       res.status(500).json({ message: "Login failed" });
     }
@@ -147,8 +147,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
     const user = await storage.getUser(req.session.user.id);
     if (!user) return res.status(404).json({ message: "User not found" });
-    const { password, ...userWithoutPassword } = user;
-    res.json(userWithoutPassword);
+    res.json(toPublicUser(user));
   });
 
   // ==================== USERS MANAGEMENT ====================
@@ -168,7 +167,7 @@ export async function registerRoutes(app: Express): Promise<void> {
       query.where(eq(users.establishment, req.session.user.establishment));
     }
     const allUsers = await query;
-    res.json(allUsers.map(({ password, ...u }) => u));
+    res.json(allUsers.map(toPublicUser));
   });
 
   // List pending users
@@ -185,7 +184,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     const pendingUsers = await db.select().from(users).where(and(...conditions));
     const rolesICanApprove = APPROVAL_HIERARCHY[req.session.user.role] || [];
     const filteredUsers = pendingUsers.filter(u => rolesICanApprove.includes(u.role));
-    res.json(filteredUsers);
+    res.json(filteredUsers.map(toPublicUser));
   });
 
   // Approve user
@@ -265,8 +264,7 @@ export async function registerRoutes(app: Express): Promise<void> {
       const user = await storage.updateUser(targetId, updates);
       if (!user) return res.status(404).json({ message: "User not found" });
 
-      const { password, ...userWithoutPassword } = user;
-      res.json(userWithoutPassword);
+      res.json(toPublicUser(user));
     } catch (error) {
       if (error instanceof z.ZodError) return res.status(400).json({ errors: error.errors });
       console.error("User update error:", error);
@@ -318,11 +316,13 @@ export async function registerRoutes(app: Express): Promise<void> {
             .set({ avatarUrl: fileUrl })
             .where(eq(users.id, req.session.user.id))
             .returning();
-        
-        // Actualizamos la sesión
-        req.session.user = updatedUser;
-            
-        res.json({ success: true, avatarUrl: fileUrl, user: updatedUser });
+
+        if (!updatedUser) return res.status(404).send("User not found");
+
+        const publicUser = toPublicUser(updatedUser);
+        req.session.user = publicUser;
+
+        res.json({ success: true, avatarUrl: fileUrl, user: publicUser });
     } catch (error) {
         console.error("Avatar upload error:", error);
         res.status(500).send("Error uploading avatar");
@@ -918,8 +918,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         type: 'success'
       });
       
-      const { password: _, ...userWithoutPassword } = user;
-      res.status(201).json(userWithoutPassword);
+      res.status(201).json(toPublicUser(user));
     } catch (error) {
       if (error instanceof z.ZodError) return res.status(400).json({ errors: error.errors });
       console.error("User creation error:", error);
