@@ -65,7 +65,28 @@ app.use(
   })
 );
 
-app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+const UPLOAD_IMAGE_EXTENSIONS = new Set([".jpg", ".png", ".webp"]);
+
+app.use(
+  "/uploads",
+  (req, res, next) => {
+    const extension = path.extname(req.path).toLowerCase();
+    if (!UPLOAD_IMAGE_EXTENSIONS.has(extension)) {
+      res.sendStatus(404);
+      return;
+    }
+    next();
+  },
+  express.static(path.join(process.cwd(), "uploads"), {
+    setHeaders(res) {
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Content-Security-Policy", "default-src 'none'");
+    },
+  }),
+  (_req, res) => {
+    res.sendStatus(404);
+  },
+);
 
 // --- Middleware para parsear JSON y URL-encoded ---
 // Aumentamos el limite a 10mb para permitir subida de fotos
