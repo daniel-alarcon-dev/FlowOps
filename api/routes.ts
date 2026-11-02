@@ -5,7 +5,11 @@ import type { Express, Request, Response } from "express";
 import { storage } from "./storage";
 import bcrypt from "bcrypt";
 import { 
-  insertUserSchema, 
+  registerUserSchema,
+  adminCreateUserSchema,
+  updateUserSchema,
+  managerUpdateUserSchema,
+  adminUpdateUserSchema,
   insertInventorySchema,
   insertEquipmentSchema,
   insertChecklistItemSchema,
@@ -48,12 +52,20 @@ function canManageUsers(user: SessionUser | undefined): boolean {
   return user?.role === 'manager' || isSystemAdminUser(user);
 }
 
+function isGlobalAdmin(user: SessionUser | undefined): boolean {
+  return isSystemAdminUser(user) || user?.role === 'admin';
+}
+
+function canAssignUserRole(user: SessionUser | undefined): boolean {
+  return isGlobalAdmin(user) || user?.role === 'manager';
+}
+
 export async function registerRoutes(app: Express): Promise<void> {
 
   // ==================== AUTH ROUTES ====================
   app.post("/api/auth/register", async (req: Request, res: Response) => {
     try {
-      const validatedData = insertUserSchema.parse(req.body);
+      const validatedData = registerUserSchema.parse(req.body);
 
       const existingUser = await storage.getUserByUsername(validatedData.username);
       const existingEmail = await storage.getUserByEmail(validatedData.email);
@@ -64,10 +76,15 @@ export async function registerRoutes(app: Express): Promise<void> {
       const hashedPassword = await bcrypt.hash(validatedData.password, SALT_ROUNDS);
 
       const user = await storage.createUser({
-        ...validatedData,
+        name: validatedData.name,
+        email: validatedData.email,
+        username: validatedData.username,
         password: hashedPassword,
+        establishment: validatedData.establishment,
+        phoneNumber: validatedData.phoneNumber,
         status: 'pending',
-        role: 'employee'
+        role: 'employee',
+        isSystemAdmin: false,
       });
 
       try {
@@ -207,6 +224,54 @@ export async function registerRoutes(app: Express): Promise<void> {
 
     await db.update(users).set({ status: 'removed' }).where(eq(users.id, targetUser.id));
     res.json({ message: "User rejected" });
+  });
+
+  app.patch("/api/users/:id", async (req: Request, res: Response) => {
+    if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
+
+    const actor = req.session.user;
+    const targetId = req.params.id;
+    const isSelf = actor.id === targetId;
+    const allowRole = canAssignUserRole(actor);
+
+    if (!isSelf && !allowRole) {
+      return res.status(403).json({ message: "You are not allowed to update this user" });
+    }
+
+    try {
+      const schema = isGlobalAdmin(actor)
+        ? adminUpdateUserSchema
+        : allowRole
+          ? managerUpdateUserSchema
+          : updateUserSchema;
+      const updates = schema.parse(req.body);
+
+      if ("role" in updates && updates.role !== undefined && isSelf) {
+        return res.status(403).json({ message: "You cannot change your own role" });
+      }
+
+      const [existing] = await db.select().from(users).where(eq(users.id, targetId)).limit(1);
+      if (!existing) return res.status(404).json({ message: "User not found" });
+
+      if (!isSelf && !isGlobalAdmin(actor) && existing.establishment !== actor.establishment) {
+        return res.status(403).json({ message: "Cannot update users from another establishment" });
+      }
+
+      if (updates.email && updates.email !== existing.email) {
+        const existingEmail = await storage.getUserByEmail(updates.email);
+        if (existingEmail) return res.status(400).json({ message: "Email already exists" });
+      }
+
+      const user = await storage.updateUser(targetId, updates);
+      if (!user) return res.status(404).json({ message: "User not found" });
+
+      const { password, ...userWithoutPassword } = user;
+      res.json(userWithoutPassword);
+    } catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ errors: error.errors });
+      console.error("User update error:", error);
+      res.status(500).json({ message: "Failed to update user" });
+    }
   });
 
   // --- CONFIGURACIÓN DE SUBIDA DE IMÁGENES (MULTER) ---
@@ -824,33 +889,29 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
     
     try {
-      const { username, email, name, password, role, establishment } = req.body;
-      
-      if (!username || !email || !name || !password || !role || !establishment) {
-        return res.status(400).json({ message: "All fields are required" });
-      }
-      
-      const existingUser = await storage.getUserByUsername(username);
-      const existingEmail = await storage.getUserByEmail(email);
+      const input = adminCreateUserSchema.parse(req.body);
+
+      const existingUser = await storage.getUserByUsername(input.username);
+      const existingEmail = await storage.getUserByEmail(input.email);
       
       if (existingUser) return res.status(400).json({ message: "Username already exists" });
       if (existingEmail) return res.status(400).json({ message: "Email already exists" });
       
-      const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
+      const hashedPassword = await bcrypt.hash(input.password, SALT_ROUNDS);
       
       const user = await storage.createUser({
-        username,
-        email,
-        name,
+        username: input.username,
+        email: input.email,
+        name: input.name,
         password: hashedPassword,
-        role,
-        establishment,
+        role: input.role,
+        establishment: input.establishment,
         status: 'active',
-        isSystemAdmin: false
+        isSystemAdmin: false,
       });
       
       await storage.createTimelineEvent({
-        text: `User created by Admin: ${user.name} as ${role}`,
+        text: `User created by Admin: ${user.name} as ${user.role}`,
         establishment: user.establishment,
         author: req.session.user.name,
         authorRole: 'admin',
@@ -860,6 +921,7 @@ export async function registerRoutes(app: Express): Promise<void> {
       const { password: _, ...userWithoutPassword } = user;
       res.status(201).json(userWithoutPassword);
     } catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ errors: error.errors });
       console.error("User creation error:", error);
       res.status(500).json({ message: "Failed to create user" });
     }

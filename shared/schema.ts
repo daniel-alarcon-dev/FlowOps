@@ -40,6 +40,77 @@ export const insertUserSchema = createInsertSchema(users).omit({
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
 
+const requiredText = z.string().trim().min(1);
+
+export const userRoleSchema = z.enum([
+  ROLES.ADMIN,
+  ROLES.MANAGER,
+  ROLES.SUPERVISOR,
+  ROLES.LEAD,
+  ROLES.EMPLOYEE,
+]);
+
+const optionalPhone = z
+  .string()
+  .trim()
+  .optional()
+  .transform((value) => (value ? value : undefined));
+
+function withAtLeastOneField<T extends z.ZodRawShape>(schema: z.ZodObject<T>) {
+  return schema.strict().refine((value) => Object.keys(value).length > 0, {
+    message: "At least one field is required",
+  });
+}
+
+/**
+ * Client allowlists for user writes. `status` and `isSystemAdmin` are never
+ * accepted. `role` is accepted only when an admin assigns it.
+ */
+export const registerUserSchema = z
+  .object({
+    name: requiredText,
+    email: requiredText,
+    username: requiredText,
+    password: z.string().min(1),
+    establishment: requiredText,
+    phoneNumber: optionalPhone,
+  })
+  .strict();
+
+export const adminCreateUserSchema = z
+  .object({
+    name: requiredText,
+    email: requiredText,
+    username: requiredText,
+    password: z.string().min(1),
+    role: userRoleSchema,
+    establishment: requiredText,
+  })
+  .strict();
+
+const userProfileUpdateFields = {
+  name: requiredText.optional(),
+  email: requiredText.optional(),
+};
+
+export const updateUserSchema = withAtLeastOneField(z.object(userProfileUpdateFields));
+
+const managerAssignableRoleSchema = z.enum([ROLES.EMPLOYEE, ROLES.LEAD, ROLES.MANAGER]);
+
+export const managerUpdateUserSchema = withAtLeastOneField(
+  z.object({
+    ...userProfileUpdateFields,
+    role: managerAssignableRoleSchema.optional(),
+  }),
+);
+
+export const adminUpdateUserSchema = withAtLeastOneField(
+  z.object({
+    ...userProfileUpdateFields,
+    role: userRoleSchema.optional(),
+  }),
+);
+
 
 // ============ INVENTORY (ACTUALIZADO) ============
 // Cambiamos la 'I' mayúscula por 'i' minúscula
