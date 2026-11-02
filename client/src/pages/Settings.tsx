@@ -82,7 +82,7 @@ setTimeout(() => window.location.reload(), 1000);
                 type="file" 
                 ref={fileInputRef} 
                 onChange={handleFileSelect} 
-                accept="image/png, image/jpeg, image/jpg" 
+                accept="image/jpeg,image/png,image/webp" 
                 className="hidden"
             />
             

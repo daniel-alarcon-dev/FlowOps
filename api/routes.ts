@@ -1,7 +1,8 @@
-import multer from 'multer';
-import path from 'path';
-import fs from 'fs';
-import type { Express, Request, Response } from "express";
+import { randomBytes } from "crypto";
+import multer from "multer";
+import path from "path";
+import fs from "fs";
+import type { Express, NextFunction, Request, Response } from "express";
 import { storage } from "./storage";
 import bcrypt from "bcrypt";
 import { 
@@ -66,6 +67,38 @@ function isGlobalAdmin(user: SessionUser | undefined): boolean {
 
 function canAssignUserRole(user: SessionUser | undefined): boolean {
   return isGlobalAdmin(user) || user?.role === 'manager';
+}
+
+function requireAuth(req: Request, res: Response, next: NextFunction): void {
+  if (!req.session.user) {
+    res.status(401).json({ message: "Not authenticated" });
+    return;
+  }
+  next();
+}
+
+const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff]);
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const AVATAR_MAX_BYTES = 5 * 1024 * 1024;
+
+type AllowedImageExtension = ".jpg" | ".png" | ".webp";
+
+function hasSignature(buffer: Buffer, signature: Buffer): boolean {
+  return buffer.length >= signature.length && buffer.subarray(0, signature.length).equals(signature);
+}
+
+/** JPEG, PNG, or WebP from the file bytes. The client MIME type and name are ignored. */
+function extensionFromImageSignature(buffer: Buffer): AllowedImageExtension | null {
+  if (hasSignature(buffer, JPEG_SIGNATURE)) return ".jpg";
+  if (hasSignature(buffer, PNG_SIGNATURE)) return ".png";
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(0, 4).toString("ascii") === "RIFF" &&
+    buffer.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return ".webp";
+  }
+  return null;
 }
 
 const ROLE_RANK: Record<string, number> = {
@@ -294,60 +327,75 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
   });
 
-  // --- CONFIGURACIÓN DE SUBIDA DE IMÁGENES (MULTER) ---
-  // Aseguramos que la carpeta uploads existe
-  const uploadDir = path.join(process.cwd(), 'uploads');
+  const uploadDir = path.join(process.cwd(), "uploads");
   if (!fs.existsSync(uploadDir)) {
     fs.mkdirSync(uploadDir, { recursive: true });
   }
 
-  const storageConfig = multer.diskStorage({
-    destination: function (req, file, cb) {
-      cb(null, uploadDir)
-    },
-    filename: function (req, file, cb) {
-      // Nombre único: timestamp + extensión original
-      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-      cb(null, 'avatar-' + uniqueSuffix + path.extname(file.originalname));
-    }
+  // Keep the bytes in memory until the signature check passes, so a rejected
+  // SVG or HTML file is never written under the uploads directory.
+  const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: AVATAR_MAX_BYTES },
   });
 
-  const upload = multer({ 
-    storage: storageConfig,
-    limits: { fileSize: 5 * 1024 * 1024 }, // Límite de 5MB
-    fileFilter: (req, file, cb) => {
-        if (file.mimetype.startsWith('image/')) {
-            cb(null, true);
-        } else {
-            cb(new Error('Only images are allowed'));
-        }
-    }
-  });
+  function receiveAvatar(req: Request, res: Response, next: NextFunction): void {
+    upload.single("avatar")(req, res, (err: unknown) => {
+      if (!err) {
+        next();
+        return;
+      }
+      if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
+        res.status(400).json({ message: "Image too large (max 5MB)" });
+        return;
+      }
+      next(err);
+    });
+  }
 
-  // --- RUTA PARA SUBIR AVATAR ---
-  app.post('/api/user/avatar', upload.single('avatar'), async (req: any, res: Response) => {
-    if (!req.session.user) return res.status(401).send("Unauthorized");
-    if (!req.file) return res.status(400).send("No file uploaded");
+  app.post("/api/user/avatar", requireAuth, receiveAvatar, async (req: Request, res: Response) => {
+    const sessionUser = req.session.user;
+    if (!sessionUser) {
+      res.status(401).json({ message: "Not authenticated" });
+      return;
+    }
+    if (!req.file) {
+      res.status(400).json({ message: "No file uploaded" });
+      return;
+    }
+
+    const extension = extensionFromImageSignature(req.file.buffer);
+    if (!extension) {
+      res.status(400).json({ message: "Only JPEG, PNG and WebP images are allowed" });
+      return;
+    }
+
+    const filename = `avatar-${Date.now()}-${randomBytes(8).toString("hex")}${extension}`;
+    const filePath = path.join(uploadDir, filename);
+    const fileUrl = `/uploads/${filename}`;
 
     try {
-        // La URL será relativa al servidor
-        const fileUrl = `/uploads/${req.file.filename}`;
+      await fs.promises.writeFile(filePath, req.file.buffer);
 
-        // Actualizamos el usuario en la DB
-        const [updatedUser] = await db.update(users)
-            .set({ avatarUrl: fileUrl })
-            .where(eq(users.id, req.session.user.id))
-            .returning();
+      const [updatedUser] = await db.update(users)
+        .set({ avatarUrl: fileUrl })
+        .where(eq(users.id, sessionUser.id))
+        .returning();
 
-        if (!updatedUser) return res.status(404).send("User not found");
+      if (!updatedUser) {
+        await fs.promises.unlink(filePath).catch(() => undefined);
+        res.status(404).json({ message: "User not found" });
+        return;
+      }
 
-        const publicUser = toPublicUser(updatedUser);
-        req.session.user = publicUser;
+      const publicUser = toPublicUser(updatedUser);
+      req.session.user = publicUser;
 
-        res.json({ success: true, avatarUrl: fileUrl, user: publicUser });
+      res.json({ success: true, avatarUrl: fileUrl, user: publicUser });
     } catch (error) {
-        console.error("Avatar upload error:", error);
-        res.status(500).send("Error uploading avatar");
+      await fs.promises.unlink(filePath).catch(() => undefined);
+      console.error("Avatar upload error:", error);
+      res.status(500).json({ message: "Error uploading avatar" });
     }
   });
   
