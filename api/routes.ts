@@ -68,6 +68,21 @@ function canAssignUserRole(user: SessionUser | undefined): boolean {
   return isGlobalAdmin(user) || user?.role === 'manager';
 }
 
+const ROLE_RANK: Record<string, number> = {
+  admin: 5,
+  manager: 4,
+  supervisor: 3,
+  lead: 2,
+  employee: 1,
+};
+
+function hasLowerRank(actorRole: string, targetRole: string): boolean {
+  const actorRank = ROLE_RANK[actorRole];
+  const targetRank = ROLE_RANK[targetRole];
+  if (actorRank === undefined || targetRank === undefined) return false;
+  return targetRank < actorRank;
+}
+
 export async function registerRoutes(app: Express): Promise<void> {
 
   // ==================== AUTH ROUTES ====================
@@ -221,6 +236,10 @@ export async function registerRoutes(app: Express): Promise<void> {
     const rolesICanApprove = APPROVAL_HIERARCHY[req.session.user.role] || [];
     if (!rolesICanApprove.includes(targetUser.role)) return res.status(403).json({ message: "Cannot reject this user" });
 
+    if (!req.session.user.isSystemAdmin && req.session.user.role !== 'admin') {
+      if (targetUser.establishment !== req.session.user.establishment) return res.status(403).json({ message: "Cannot reject users from another establishment" });
+    }
+
     await db.update(users).set({ status: 'removed' }).where(eq(users.id, targetUser.id));
     res.json({ message: "User rejected" });
   });
@@ -230,30 +249,33 @@ export async function registerRoutes(app: Express): Promise<void> {
 
     const actor = req.session.user;
     const targetId = req.params.id;
-    const isSelf = actor.id === targetId;
-    const allowRole = canAssignUserRole(actor);
-
-    if (!isSelf && !allowRole) {
-      return res.status(403).json({ message: "You are not allowed to update this user" });
-    }
 
     try {
+      const [existing] = await db.select().from(users).where(eq(users.id, targetId)).limit(1);
+      if (!existing) return res.status(404).json({ message: "User not found" });
+
+      if (existing.isSystemAdmin && !isSystemAdminUser(actor)) {
+        return res.status(403).json({ message: "Only a system admin can edit a system admin" });
+      }
+
+      if (!isGlobalAdmin(actor)) {
+        if (existing.establishment !== actor.establishment) {
+          return res.status(403).json({ message: "Cannot update users from another establishment" });
+        }
+        if (!hasLowerRank(actor.role, existing.role)) {
+          return res.status(403).json({ message: "You can only edit users of a lower rank" });
+        }
+      }
+
       const schema = isGlobalAdmin(actor)
         ? adminUpdateUserSchema
-        : allowRole
+        : canAssignUserRole(actor)
           ? managerUpdateUserSchema
           : updateUserSchema;
       const updates = schema.parse(req.body);
 
-      if ("role" in updates && updates.role !== undefined && isSelf) {
+      if ("role" in updates && updates.role !== undefined && actor.id === targetId) {
         return res.status(403).json({ message: "You cannot change your own role" });
-      }
-
-      const [existing] = await db.select().from(users).where(eq(users.id, targetId)).limit(1);
-      if (!existing) return res.status(404).json({ message: "User not found" });
-
-      if (!isSelf && !isGlobalAdmin(actor) && existing.establishment !== actor.establishment) {
-        return res.status(403).json({ message: "Cannot update users from another establishment" });
       }
 
       if (updates.email && updates.email !== existing.email) {
