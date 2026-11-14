@@ -124,15 +124,24 @@ async function main(): Promise<void> {
       );
     }
 
-    if (present.length === APP_TABLES.length) {
+    const recorded = await client.query(`
+      SELECT to_regclass('drizzle.__drizzle_migrations') AS name
+    `);
+    const migrationsTable = recorded.rows[0]?.name;
+    let recordedCount = 0;
+    if (migrationsTable) {
+      const count = await client.query("SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations");
+      recordedCount = count.rows[0]?.n ?? 0;
+    }
+
+    if (present.length === APP_TABLES.length && recordedCount === 0) {
       await baseline(client);
-      console.log(`Baselined existing schema on dev host ${host}. SQL was not replayed.`);
-      return;
+      console.log(`Baselined existing schema on dev host ${host}.`);
     }
 
     const db = drizzle(pool);
     await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
-    console.log(`Applied migrations on empty dev host ${host}.`);
+    console.log(`Migrations are up to date on dev host ${host}.`);
   } finally {
     client.release();
     await pool.end();

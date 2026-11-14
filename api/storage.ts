@@ -275,11 +275,12 @@ export class DatabaseStorage implements IStorage {
   async getTimelineEventsByEstablishment(establishment: string): Promise<TimelineEvent[]> {
     return await db.select().from(timelineEvents)
       .where(eq(timelineEvents.establishment, establishment))
-      .orderBy(desc(timelineEvents.timestamp));
+      .orderBy(desc(timelineEvents.timestamp))
+      .limit(100);
   }
 
   async getAllTimelineEvents(): Promise<TimelineEvent[]> {
-    return await db.select().from(timelineEvents).orderBy(desc(timelineEvents.timestamp));
+    return await db.select().from(timelineEvents).orderBy(desc(timelineEvents.timestamp)).limit(100);
   }
 
   async createTimelineEvent(event: InsertTimelineEvent): Promise<TimelineEvent> {
@@ -372,7 +373,8 @@ export class DatabaseStorage implements IStorage {
   async getInventoryLogsByEstablishment(establishment: string): Promise<InventoryLog[]> {
     return await db.select().from(inventoryLogs)
       .where(eq(inventoryLogs.establishment, establishment))
-      .orderBy(desc(inventoryLogs.date)); // Los más recientes primero
+      .orderBy(desc(inventoryLogs.date))
+      .limit(100);
   }
 
   async createInventoryLog(log: InsertInventoryLog): Promise<InventoryLog> {

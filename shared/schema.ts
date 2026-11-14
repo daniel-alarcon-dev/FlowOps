@@ -1,7 +1,8 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, timestamp, boolean, integer, real } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, timestamp, boolean, integer, real, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
+import { establishmentSchema } from "./access";
 import { relations } from "drizzle-orm";
 
 // 1. DEFINIR LOS ROLES
@@ -29,7 +30,9 @@ export const users = pgTable("users", {
   isSystemAdmin: boolean("is_system_admin").notNull().default(false),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   avatarUrl: text("avatar_url"),
-});
+}, (table) => ({
+  establishmentIdx: index("users_establishment_idx").on(table.establishment),
+}));
 
 
 export const insertUserSchema = createInsertSchema(users).omit({
@@ -71,8 +74,8 @@ export const registerUserSchema = z
     name: requiredText,
     email: requiredText,
     username: requiredText,
-    password: z.string().min(1),
-    establishment: requiredText,
+    password: z.string().min(8).max(200),
+    establishment: establishmentSchema,
     phoneNumber: optionalPhone,
   })
   .strict();
@@ -82,7 +85,7 @@ export const adminCreateUserSchema = z
     name: requiredText,
     email: requiredText,
     username: requiredText,
-    password: z.string().min(1),
+    password: z.string().min(8).max(200),
     role: userRoleSchema,
     establishment: requiredText,
   })
@@ -133,7 +136,9 @@ export const inventory = pgTable("inventory", {
   lastUpdated: timestamp("last_updated").defaultNow().notNull(),
   updatedBy: text("updated_by").notNull(),
   lowComment: text("low_comment"),
-});
+}, (table) => ({
+  establishmentIdx: index("inventory_establishment_idx").on(table.establishment),
+}));
 
 export const insertInventorySchema = createInsertSchema(inventory).omit({
   id: true,
@@ -152,7 +157,11 @@ export const equipment = pgTable("equipment", {
   status: text("status").notNull().default('Working'), // 'Working' | 'Attention' | 'Broken'
   establishment: text("establishment").notNull(),
   lastIssue: text("last_issue"),
-});
+  location: text("location"),
+  notes: text("notes"),
+}, (table) => ({
+  establishmentIdx: index("equipment_establishment_idx").on(table.establishment),
+}));
 
 export const insertEquipmentSchema = createInsertSchema(equipment).omit({
   id: true,
@@ -277,7 +286,7 @@ export const ingredients = pgTable("ingredients", {
   menuItemId: varchar("menu_item_id").notNull().references(() => menuItems.id, { onDelete: 'cascade' }),
   
   // --- NUEVO CAMPO: EL LINK AL INVENTARIO ---
-  inventoryItemId: varchar("inventory_item_id").references(() => inventory.id), 
+  inventoryItemId: varchar("inventory_item_id").references(() => inventory.id, { onDelete: "set null" }), 
   // ------------------------------------------
 
   name: text("name").notNull(),
@@ -322,16 +331,28 @@ export type Notification = typeof notifications.$inferSelect;
 // ============ SALES (NUEVA TABLA) ============
 export const sales = pgTable("sales", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  menuItemId: varchar("menu_item_id").references(() => menuItems.id),
+  menuItemId: varchar("menu_item_id").references(() => menuItems.id, { onDelete: "set null" }),
   quantitySold: integer("quantity_sold").notNull(), // Ej: 3
   date: timestamp("date").defaultNow().notNull(),
   establishment: text("establishment").notNull(), // Importante para filtrar por local
-});
+}, (table) => ({
+  establishmentIdx: index("sales_establishment_idx").on(table.establishment),
+  dateIdx: index("sales_date_idx").on(table.date),
+}));
 
 export const insertSaleSchema = createInsertSchema(sales).omit({
   id: true,
   date: true,
 });
+
+export const saleLineSchema = z.object({
+  menuItemId: z.string().trim().min(1).max(80),
+  quantitySold: z.number().int().positive().max(10000),
+}).strict();
+
+export const saleBatchSchema = z.object({
+  lines: z.array(saleLineSchema).min(1).max(100),
+}).strict();
 
 export type InsertSale = typeof sales.$inferInsert;
 export type Sale = typeof sales.$inferSelect;
@@ -345,7 +366,10 @@ export const inventoryLogs = pgTable("inventory_logs", {
   user: text("user").notNull(),        // Quién hizo el cambio
   date: timestamp("date").defaultNow().notNull(),
   establishment: text("establishment").notNull(),
-});
+  inventoryItemId: varchar("inventory_item_id").references(() => inventory.id, { onDelete: "set null" }),
+}, (table) => ({
+  establishmentIdx: index("inventory_logs_establishment_idx").on(table.establishment),
+}));
 
 export const insertInventoryLogSchema = createInsertSchema(inventoryLogs).omit({
   id: true,

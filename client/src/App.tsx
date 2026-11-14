@@ -3,8 +3,11 @@ import { Switch, Route, useLocation } from "wouter";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { queryClient } from "./lib/queryClient";
 import { Toaster } from "@/components/ui/toaster";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useStore } from "@/lib/store";
+import { api } from "@/lib/api";
 import { useEffect } from "react";
+import Forbidden from "@/pages/Forbidden";
 
 import Home from "@/pages/Home";
 import Inventory from "@/pages/Inventory";
@@ -77,7 +80,7 @@ function Router() {
                  currentUser?.role === 'lead' ||
                  currentUser?.isSystemAdmin)
           ? <PrivateRoute component={Employees} categoryColor="#E91E63" /> 
-           : <NotFound />
+           : <Forbidden />
          }
       </Route>
      
@@ -106,11 +109,41 @@ function Router() {
 }
 
 function App() {
+  const { setCurrentUser } = useStore();
+  const [, setLocation] = useLocation();
+
+  useEffect(() => {
+    let cancelled = false;
+    api.auth.me()
+      .then((user) => {
+        if (!cancelled) setCurrentUser(user);
+      })
+      .catch(() => {
+        if (!cancelled) setCurrentUser(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [setCurrentUser]);
+
+  useEffect(() => {
+    const onUnauthorized = () => {
+      queryClient.clear();
+      setCurrentUser(null);
+      localStorage.removeItem("flowops-storage");
+      setLocation("/login");
+    };
+    window.addEventListener("flowops:unauthorized", onUnauthorized);
+    return () => window.removeEventListener("flowops:unauthorized", onUnauthorized);
+  }, [setCurrentUser, setLocation]);
+
   return (
-    <QueryClientProvider client={queryClient}>
-      <Router />
-      <Toaster />
-    </QueryClientProvider>
+    <ErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <Router />
+        <Toaster />
+      </QueryClientProvider>
+    </ErrorBoundary>
   );
 }
 

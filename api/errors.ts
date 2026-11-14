@@ -1,4 +1,5 @@
 import type { Express, NextFunction, Request, RequestHandler, Response } from "express";
+import { ZodError } from "zod";
 
 type AsyncRouteHandler = (
   req: Request,
@@ -74,6 +75,11 @@ function clientMessageFrom(err: unknown): string {
 export function errorHandler(err: unknown, _req: Request, res: Response, next: NextFunction): void {
   if (res.headersSent) {
     next(err);
+    return;
+  }
+
+  if (err instanceof ZodError) {
+    res.status(400).json({ errors: err.errors });
     return;
   }
 

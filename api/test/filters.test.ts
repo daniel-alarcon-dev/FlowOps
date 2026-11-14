@@ -125,6 +125,19 @@ describe("establishment filters", () => {
     }
   });
 
+  it("does not let an employee delete inventory from another establishment", async () => {
+    const owner = await login("employee-a");
+    const items = await owner.get("/api/inventory").expect(200);
+    const id = items.body[0].id as string;
+
+    const other = await login("employee-b");
+    await other.delete(`/api/inventory/${id}`).expect(404);
+
+    const again = await owner.get("/api/inventory").expect(200);
+    expect(again.body).toHaveLength(1);
+    await owner.get("/api/does-not-exist").expect(404);
+  });
+
   it("lets an admin see every establishment", async () => {
     const admin = await login("admin-user");
 
