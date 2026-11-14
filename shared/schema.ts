@@ -37,7 +37,7 @@ export const insertUserSchema = createInsertSchema(users).omit({
   createdAt: true,
 });
 
-export type InsertUser = z.infer<typeof insertUserSchema>;
+export type InsertUser = typeof users.$inferInsert;
 export type User = typeof users.$inferSelect;
 
 const requiredText = z.string().trim().min(1);
@@ -140,7 +140,7 @@ export const insertInventorySchema = createInsertSchema(inventory).omit({
   lastUpdated: true,
 });
 
-export type InsertInventory = z.infer<typeof insertInventorySchema>;
+export type InsertInventory = typeof inventory.$inferInsert;
 export type Inventory = typeof inventory.$inferSelect;
 
 
@@ -158,7 +158,7 @@ export const insertEquipmentSchema = createInsertSchema(equipment).omit({
   id: true,
 });
 
-export type InsertEquipment = z.infer<typeof insertEquipmentSchema>;
+export type InsertEquipment = typeof equipment.$inferInsert;
 export type Equipment = typeof equipment.$inferSelect;
 
 // ============ CHECKLIST ITEMS ============
@@ -178,7 +178,7 @@ export const insertChecklistItemSchema = createInsertSchema(checklistItems).omit
   id: true,
 });
 
-export type InsertChecklistItem = z.infer<typeof insertChecklistItemSchema>;
+export type InsertChecklistItem = typeof checklistItems.$inferInsert;
 export type ChecklistItem = typeof checklistItems.$inferSelect;
 
 // ============ WEEKLY TASKS ============
@@ -196,7 +196,7 @@ export const insertWeeklyTaskSchema = createInsertSchema(weeklyTasks).omit({
   id: true,
 });
 
-export type InsertWeeklyTask = z.infer<typeof insertWeeklyTaskSchema>;
+export type InsertWeeklyTask = typeof weeklyTasks.$inferInsert;
 export type WeeklyTask = typeof weeklyTasks.$inferSelect;
 
 // ============ TASK COMPLETIONS (History) ============
@@ -213,7 +213,7 @@ export const insertTaskCompletionSchema = createInsertSchema(taskCompletions).om
   completedAt: true,
 });
 
-export type InsertTaskCompletion = z.infer<typeof insertTaskCompletionSchema>;
+export type InsertTaskCompletion = typeof taskCompletions.$inferInsert;
 export type TaskCompletion = typeof taskCompletions.$inferSelect;
 
 // ============ CHAT MESSAGES ============
@@ -232,7 +232,7 @@ export const insertChatMessageSchema = createInsertSchema(chatMessages).omit({
   timestamp: true,
 });
 
-export type InsertChatMessage = z.infer<typeof insertChatMessageSchema>;
+export type InsertChatMessage = typeof chatMessages.$inferInsert;
 export type ChatMessage = typeof chatMessages.$inferSelect;
 
 // ============ TIMELINE EVENTS ============
@@ -253,7 +253,7 @@ export const insertTimelineEventSchema = createInsertSchema(timelineEvents).omit
   timestamp: true,
 });
 
-export type InsertTimelineEvent = z.infer<typeof insertTimelineEventSchema>;
+export type InsertTimelineEvent = typeof timelineEvents.$inferInsert;
 export type TimelineEvent = typeof timelineEvents.$inferSelect;
 
 // ============ MENU ITEMS ============
@@ -268,7 +268,7 @@ export const insertMenuItemSchema = createInsertSchema(menuItems).omit({
   id: true,
 });
 
-export type InsertMenuItem = z.infer<typeof insertMenuItemSchema>;
+export type InsertMenuItem = typeof menuItems.$inferInsert;
 export type MenuItem = typeof menuItems.$inferSelect;
 
 // ============ INGREDIENTS (ACTUALIZADO) ============
@@ -290,7 +290,7 @@ export const insertIngredientSchema = createInsertSchema(ingredients).omit({
   id: true,
 });
 
-export type InsertIngredient = z.infer<typeof insertIngredientSchema>;
+export type InsertIngredient = typeof ingredients.$inferInsert;
 export type Ingredient = typeof ingredients.$inferSelect;
 
 
@@ -312,7 +312,7 @@ export const insertNotificationSchema = createInsertSchema(notifications).omit({
   createdAt: true,
 });
 
-export type InsertNotification = z.infer<typeof insertNotificationSchema>;
+export type InsertNotification = typeof notifications.$inferInsert;
 export type Notification = typeof notifications.$inferSelect;
 
 // The `session` table belongs to connect-pg-simple (createTableIfMissing),
@@ -333,7 +333,7 @@ export const insertSaleSchema = createInsertSchema(sales).omit({
   date: true,
 });
 
-export type InsertSale = z.infer<typeof insertSaleSchema>;
+export type InsertSale = typeof sales.$inferInsert;
 export type Sale = typeof sales.$inferSelect;
 
 // ============ INVENTORY LOGS (NUEVA TABLA) ============
@@ -352,5 +352,5 @@ export const insertInventoryLogSchema = createInsertSchema(inventoryLogs).omit({
   date: true,
 });
 
-export type InsertInventoryLog = z.infer<typeof insertInventoryLogSchema>;
+export type InsertInventoryLog = typeof inventoryLogs.$inferInsert;
 export type InventoryLog = typeof inventoryLogs.$inferSelect;

@@ -15,8 +15,9 @@ export function serveStatic(app: Express) {
   // Servir archivos estáticos (JS, CSS, imágenes)
   app.use(express.static(distPath));
 
-  // 3. Para cualquier otra ruta, devolver el index.html (Vital para React)
-  app.use("*", (req, res) => {
+  // Any route the static files did not handle is a client-side route.
+  // A pathless middleware matches those requests on Express 4 and Express 5.
+  app.use((_req, res) => {
     res.sendFile(path.resolve(distPath, "index.html"));
   });
 }

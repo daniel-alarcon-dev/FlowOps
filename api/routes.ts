@@ -31,6 +31,16 @@ import { users, inventory, equipment, checklistItems, weeklyTasks, taskCompletio
 
 const SALT_ROUNDS = 10;
 
+/** Express 5 types route params as `string | string[]`. These routes use a single `:id`. */
+function routeParam(req: Request, name: string): string {
+  const value = req.params[name];
+  if (typeof value === "string" && value.length > 0) return value;
+  if (Array.isArray(value) && typeof value[0] === "string" && value[0].length > 0) return value[0];
+  const error = new Error("Missing route parameter") as Error & { statusCode: number };
+  error.statusCode = 400;
+  throw error;
+}
+
 type PublicUser = Omit<User, "password">;
 
 interface SessionUser {
@@ -238,7 +248,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   // Approve user
   app.post("/api/users/:id/approve", async (req, res) => {
     if (!req.session.user) return res.sendStatus(401);
-    const [targetUser] = await db.select().from(users).where(eq(users.id, req.params.id)).limit(1);
+    const [targetUser] = await db.select().from(users).where(eq(users.id, routeParam(req, "id"))).limit(1);
     if (!targetUser) return res.status(404).send("User not found");
 
     const rolesICanApprove = APPROVAL_HIERARCHY[req.session.user.role] || [];
@@ -263,7 +273,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   // Reject user
   app.delete("/api/users/:id/reject", async (req, res) => {
     if (!req.session.user) return res.sendStatus(401);
-    const [targetUser] = await db.select().from(users).where(eq(users.id, req.params.id)).limit(1);
+    const [targetUser] = await db.select().from(users).where(eq(users.id, routeParam(req, "id"))).limit(1);
     if (!targetUser) return res.status(404).send("User not found");
 
     const rolesICanApprove = APPROVAL_HIERARCHY[req.session.user.role] || [];
@@ -281,7 +291,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
 
     const actor = req.session.user;
-    const targetId = req.params.id;
+    const targetId = routeParam(req, "id");
 
     try {
       const [existing] = await db.select().from(users).where(eq(users.id, targetId)).limit(1);
@@ -431,7 +441,7 @@ export async function registerRoutes(app: Express): Promise<void> {
 
   app.patch("/api/inventory/:id", async (req, res) => {
     if (!req.session.user) return res.sendStatus(401);
-    const item = await storage.updateInventoryItem(req.params.id, { ...req.body, lastUpdated: new Date(), updatedBy: req.session.user.name });
+    const item = await storage.updateInventoryItem(routeParam(req, "id"), { ...req.body, lastUpdated: new Date(), updatedBy: req.session.user.name });
     if (!item) return res.status(404).json({ message: "Item not found" });
     
     // Log status changes logic restored
@@ -451,7 +461,7 @@ export async function registerRoutes(app: Express): Promise<void> {
 
   app.delete("/api/inventory/:id", async (req, res) => {
     if (!req.session.user) return res.sendStatus(401);
-    await storage.deleteInventoryItem(req.params.id);
+    await storage.deleteInventoryItem(routeParam(req, "id"));
     res.json({ message: "Inventory item deleted" });
   });
 
@@ -524,7 +534,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   
   app.patch("/api/equipment/:id", async (req: Request, res: Response) => {
     if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
-    const item = await storage.updateEquipmentItem(req.params.id, req.body);
+    const item = await storage.updateEquipmentItem(routeParam(req, "id"), req.body);
     if (!item) return res.status(404).json({ message: "Item not found" });
     
     // Log status changes
@@ -562,7 +572,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   
   app.delete("/api/equipment/:id", async (req: Request, res: Response) => {
     if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
-    await storage.deleteEquipmentItem(req.params.id);
+    await storage.deleteEquipmentItem(routeParam(req, "id"));
     res.json({ message: "Equipment item deleted" });
   });
 
@@ -616,7 +626,7 @@ export async function registerRoutes(app: Express): Promise<void> {
       updates.completedAt = new Date();
     }
     
-    const item = await storage.updateChecklistItem(req.params.id, updates);
+    const item = await storage.updateChecklistItem(routeParam(req, "id"), updates);
     if (!item) return res.status(404).json({ message: "Item not found" });
     
     if (updates.completed === true) {
@@ -634,7 +644,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   
   app.delete("/api/checklists/:id", async (req: Request, res: Response) => {
     if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
-    await storage.deleteChecklistItem(req.params.id);
+    await storage.deleteChecklistItem(routeParam(req, "id"));
     res.json({ message: "Checklist item deleted" });
   });
 
@@ -695,7 +705,7 @@ export async function registerRoutes(app: Express): Promise<void> {
       updates.completedAt = new Date();
     }
     
-    const task = await storage.updateWeeklyTask(req.params.id, updates);
+    const task = await storage.updateWeeklyTask(routeParam(req, "id"), updates);
     if (!task) return res.status(404).json({ message: "Task not found" });
     
     res.json(task);
@@ -703,7 +713,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   
   app.delete("/api/tasks/:id", async (req: Request, res: Response) => {
     if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
-    await storage.deleteWeeklyTask(req.params.id);
+    await storage.deleteWeeklyTask(routeParam(req, "id"));
     res.json({ message: "Task deleted" });
   });
 
@@ -717,12 +727,12 @@ export async function registerRoutes(app: Express): Promise<void> {
       }
       
       const completion = await storage.createTaskCompletion({
-        taskId: req.params.id,
+        taskId: routeParam(req, "id"),
         completedBy: req.session.user.name,
         photo
       });
       
-      const task = await storage.updateWeeklyTask(req.params.id, { 
+      const task = await storage.updateWeeklyTask(routeParam(req, "id"), { 
         completed: true,
         completedAt: new Date()
       });
@@ -748,7 +758,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   
   app.get("/api/tasks/:id/completions", async (req: Request, res: Response) => {
     if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
-    const completions = await storage.getTaskCompletions(req.params.id);
+    const completions = await storage.getTaskCompletions(routeParam(req, "id"));
     res.json(completions);
   });
 
@@ -877,7 +887,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     if (name) updates.name = name;
     if (category) updates.category = category;
     
-    const item = await storage.updateMenuItem(req.params.id, updates);
+    const item = await storage.updateMenuItem(routeParam(req, "id"), updates);
     if (!item) return res.status(404).json({ message: "Menu item not found" });
     res.json(item);
   });
@@ -886,7 +896,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     if (!req.session.user || (!isSystemAdminUser(req.session.user) && req.session.user.role !== 'manager')) {
       return res.status(403).json({ message: "Only managers can delete menu items" });
     }
-    await storage.deleteMenuItem(req.params.id);
+    await storage.deleteMenuItem(routeParam(req, "id"));
     res.json({ message: "Menu item deleted" });
   });
 
@@ -898,7 +908,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     try {
       const data = insertIngredientSchema.parse({
         ...req.body,
-        menuItemId: req.params.menuItemId
+        menuItemId: routeParam(req, "menuItemId")
       });
       const ingredient = await storage.createIngredient(data);
       res.status(201).json(ingredient);
@@ -912,7 +922,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     if (!req.session.user || (!isSystemAdminUser(req.session.user) && req.session.user.role !== 'manager')) {
       return res.status(403).json({ message: "Only managers can update ingredients" });
     }
-    const ingredient = await storage.updateIngredient(req.params.id, req.body);
+    const ingredient = await storage.updateIngredient(routeParam(req, "id"), req.body);
     if (!ingredient) return res.status(404).json({ message: "Ingredient not found" });
     res.json(ingredient);
   });
@@ -921,7 +931,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     if (!req.session.user || (!isSystemAdminUser(req.session.user) && req.session.user.role !== 'manager')) {
       return res.status(403).json({ message: "Only managers can delete ingredients" });
     }
-    await storage.deleteIngredient(req.params.id);
+    await storage.deleteIngredient(routeParam(req, "id"));
     res.json({ message: "Ingredient deleted" });
   });
 
@@ -940,7 +950,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   
   app.post("/api/notifications/:id/read", async (req: Request, res: Response) => {
     if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
-    const notification = await storage.markNotificationAsRead(req.params.id);
+    const notification = await storage.markNotificationAsRead(routeParam(req, "id"));
     if (!notification) return res.status(404).json({ message: "Notification not found" });
     res.json(notification);
   });
