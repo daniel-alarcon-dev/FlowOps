@@ -1,12 +1,6 @@
-import path from 'path';
 import "dotenv/config";
 import * as Sentry from "@sentry/node";
-import express from "express";
-import session from "express-session";
-import connectPgSimple from "connect-pg-simple";
-import { pool } from "./db";
-import { catchAsyncRouteErrors, errorHandler } from "./errors";
-import { registerRoutes } from "./routes";
+import { createApp } from "./app";
 import { bootstrapSystemAdmin } from "./bootstrap";
 import { serveStatic } from "./static";
 
@@ -34,101 +28,25 @@ if (sentryDsn) {
   });
 }
 
-const sessionSecret = process.env.SESSION_SECRET;
-if (!sessionSecret) {
-  throw new Error("SESSION_SECRET must be set");
-}
+async function main(): Promise<void> {
+  const app = await createApp();
 
-// Inicializa Express
-const app = express();
-app.set("trust proxy", 1);
-
-// --- Configuración de sesiones con PostgreSQL ---
-const PgStore = connectPgSimple(session);
-
-app.use(
-  session({
-    store: new PgStore({
-      pool,
-      tableName: "session",
-      createTableIfMissing: true,
-    }),
-    secret: sessionSecret,
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 días
-      secure: process.env.NODE_ENV === "production",
-      httpOnly: true,
-      sameSite: "lax",
-    },
-  })
-);
-
-const UPLOAD_IMAGE_EXTENSIONS = new Set([".jpg", ".png", ".webp"]);
-
-app.use(
-  "/uploads",
-  (req, res, next) => {
-    const extension = path.extname(req.path).toLowerCase();
-    if (!UPLOAD_IMAGE_EXTENSIONS.has(extension)) {
-      res.sendStatus(404);
-      return;
-    }
-    next();
-  },
-  express.static(path.join(process.cwd(), "uploads"), {
-    setHeaders(res) {
-      res.setHeader("X-Content-Type-Options", "nosniff");
-      res.setHeader("Content-Security-Policy", "default-src 'none'");
-    },
-  }),
-  (_req, res) => {
-    res.sendStatus(404);
-  },
-);
-
-// --- Middleware para parsear JSON y URL-encoded ---
-// Aumentamos el limite a 10mb para permitir subida de fotos
-app.use(
-  express.json({
-    limit: "10mb", // <--- ESTO ES LO QUE FALTABA
-    verify: (req, _res, buf) => {
-      (req as any).rawBody = buf;
-    },
-  })
-);
-app.use(express.urlencoded({ extended: true, limit: "10mb" })); // <--- Y ESTO TAMBIEN
-
-// --- Logging simple de requests ---
-app.use((req, res, next) => {
-  console.log(`${req.method} ${req.path}`);
-  next();
-});
-
-// --- FUNCIÓN PRINCIPAL DE ARRANQUE ---
-(async () => {
-  // 1. Crear datos iniciales (Admin)
-  await bootstrapSystemAdmin();
-
-  // 2. Registrar rutas. Async rejections are forwarded before the handlers exist.
-  catchAsyncRouteErrors(app);
-  await registerRoutes(app);
-
-  app.use(errorHandler);
-
-  // --- Servir frontend estático solo en producción ---
   if (process.env.NODE_ENV === "production") {
     serveStatic(app);
   }
 
-  // 3. ARRANCAR EL SERVIDOR (CORREGIDO)
+  await bootstrapSystemAdmin();
+
   // Render sets PORT. Locally it comes from .env, otherwise 5000.
   // The Vite dev server listens on 5173 and proxies to this same port.
   const PORT = process.env.PORT || 5000;
-  
-  // CORRECCIÓN: Como registerRoutes no devuelve nada, usamos 'app' directamente.
+
   app.listen(Number(PORT), "0.0.0.0", () => {
     console.log(`✅ Servidor escuchando en el puerto ${PORT}`);
   });
-})();
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exit(1);
+});
