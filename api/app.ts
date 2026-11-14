@@ -1,6 +1,8 @@
 import path from "path";
 import "dotenv/config";
 import express, { type Express, type Request } from "express";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "./db";
@@ -20,7 +22,40 @@ export async function createApp(): Promise<Express> {
   }
 
   const app = express();
+  app.disable("x-powered-by");
   app.set("trust proxy", 1);
+
+  app.use(
+    helmet({
+      contentSecurityPolicy: process.env.NODE_ENV === "production"
+        ? {
+            directives: {
+              defaultSrc: ["'self'"],
+              scriptSrc: ["'self'"],
+              styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+              fontSrc: ["'self'", "https://fonts.gstatic.com"],
+              imgSrc: ["'self'", "data:", "blob:"],
+              connectSrc: ["'self'", "https://*.sentry.io", "https://*.ingest.sentry.io", "https://*.ingest.de.sentry.io"],
+              objectSrc: ["'none'"],
+              baseUri: ["'self'"],
+              frameAncestors: ["'none'"],
+            },
+          }
+        : false,
+    }),
+  );
+
+  const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: (_req, res) => {
+      res.status(429).json({ message: "Too many attempts. Try again later." });
+    },
+  });
+  app.use("/api/auth/login", authLimiter);
+  app.use("/api/auth/register", authLimiter);
 
   const PgStore = connectPgSimple(session);
   app.use(
