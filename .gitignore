@@ -8,8 +8,15 @@ dist/
 
 # Secretos (MUY IMPORTANTE)
 .env
-.env.local
+.env.*
+!.env.example
 crear-admin.ts
+
+# Rotated secrets, in any directory
+rotated-secrets.txt
+
+# Architecture audit export
+Auditoría Arquitectónica de FlowOps.pdf
 
 # Archivos de usuario y temporales
 uploads/
