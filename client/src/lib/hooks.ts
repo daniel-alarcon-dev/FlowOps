@@ -259,7 +259,8 @@ export function useChat() {
   return useQuery<ChatMessage[]>({
     queryKey: ['chat'],
     queryFn: async () => {
-      const res = await fetch('/api/chat');
+      const res = await fetch('/api/chat', { credentials: 'include' });
+      if (res.status === 401) window.dispatchEvent(new Event("flowops:unauthorized"));
       if (!res.ok) throw new Error('Failed to fetch chat');
       return res.json();
     }
@@ -329,14 +330,6 @@ export function useDeleteMenuItem() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['menu'] });
     },
-  });
-}
-
-export function useMenuIngredients(id: string) {
-  return useQuery({
-    queryKey: ['menu', id, 'ingredients'],
-    queryFn: () => api.menu.getIngredients(id),
-    enabled: !!id,
   });
 }
 
@@ -425,7 +418,8 @@ export function useSales() {
   return useQuery({
     queryKey: ['sales'],
     queryFn: async () => {
-      const res = await fetch('/api/sales');
+      const res = await fetch('/api/sales', { credentials: 'include' });
+      if (res.status === 401) window.dispatchEvent(new Event("flowops:unauthorized"));
       if (!res.ok) throw new Error('Failed to fetch sales');
       return res.json();
     }
@@ -439,9 +433,13 @@ export function useCreateSale() {
       const res = await fetch('/api/sales', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(saleData)
       });
-      if (!res.ok) throw new Error('Failed to create sale');
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.message || 'Failed to create sale');
+      }
       return res.json();
     },
     onSuccess: () => {
@@ -456,7 +454,8 @@ export function useInventoryLogs() {
   return useQuery<InventoryLog[]>({
     queryKey: ['inventory-logs'],
     queryFn: async () => {
-      const res = await fetch('/api/inventory-logs');
+      const res = await fetch('/api/inventory-logs', { credentials: 'include' });
+      if (res.status === 401) window.dispatchEvent(new Event("flowops:unauthorized"));
       if (!res.ok) throw new Error('Failed to fetch inventory logs');
       return res.json();
     }

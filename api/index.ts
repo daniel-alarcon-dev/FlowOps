@@ -1,86 +1,52 @@
-import path from 'path';
 import "dotenv/config";
-import express, { Request, Response, NextFunction } from "express";
-import session from "express-session";
-import connectPgSimple from "connect-pg-simple";
-import { pool } from "./db";
-import { registerRoutes } from "./routes";
+import * as Sentry from "@sentry/node";
+import { createApp } from "./app";
 import { bootstrapSystemAdmin } from "./bootstrap";
 import { serveStatic } from "./static";
 
-// Inicializa Express
-const app = express();
-app.set("trust proxy", 1);
-
-// --- Configuración de sesiones con PostgreSQL ---
-const PgStore = connectPgSimple(session);
-
-app.use(
-  session({
-    store: new PgStore({
-      pool,
-      tableName: "session",
-      createTableIfMissing: true,
-    }),
-    secret: process.env.SESSION_SECRET || "flowops-secret-key-change-in-production",
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 días
-      secure: process.env.NODE_ENV === "production",
-      httpOnly: true,
-      sameSite: "lax",
+// Express errors and traces are captured by the default expressIntegration.
+// That integration needs the diagnostics-channel hook installed before Express
+// loads, which `npm run dev` / `npm start` do via `--import @sentry/node/import`.
+// setupExpressErrorHandler is deprecated in @sentry/node 11; do not add it back.
+const sentryDsn = process.env.SENTRY_DSN?.trim();
+if (sentryDsn) {
+  Sentry.init({
+    dsn: sentryDsn,
+    environment: process.env.NODE_ENV || "development",
+    // SDK 11 removed this flag from the option types. The spread keeps it on the
+    // init object. dataCollection is what the SDK actually enforces.
+    ...{ sendDefaultPii: false },
+    dataCollection: {
+      userInfo: false,
+      cookies: false,
+      httpHeaders: false,
+      httpBodies: [],
+      urlQueryParams: false,
     },
-  })
-);
-
-app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
-
-// --- Middleware para parsear JSON y URL-encoded ---
-// Aumentamos el limite a 10mb para permitir subida de fotos
-app.use(
-  express.json({
-    limit: "10mb", // <--- ESTO ES LO QUE FALTABA
-    verify: (req, _res, buf) => {
-      (req as any).rawBody = buf;
-    },
-  })
-);
-app.use(express.urlencoded({ extended: true, limit: "10mb" })); // <--- Y ESTO TAMBIEN
-
-// --- Logging simple de requests ---
-app.use((req, res, next) => {
-  console.log(`${req.method} ${req.path}`);
-  next();
-});
-
-// --- FUNCIÓN PRINCIPAL DE ARRANQUE ---
-(async () => {
-  // 1. Crear datos iniciales (Admin)
-  await bootstrapSystemAdmin();
-
-  // 2. Registrar rutas (y obtener el servidor HTTP si existe)
-  // IMPORTANTE: registerRoutes suele devolver el servidor HTTP para websockets
-  const server = await registerRoutes(app);
-
-  // --- Error handler ---
-  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-    const status = err.status || err.statusCode || 500;
-    const message = err.message || "Internal Server Error";
-    res.status(status).json({ message });
+    // Capture every trace in this first setup. Lower this if production volume grows.
+    tracesSampleRate: 1.0,
   });
+}
 
-  // --- Servir frontend estático solo en producción ---
+async function main(): Promise<void> {
+  const app = await createApp();
+
   if (process.env.NODE_ENV === "production") {
     serveStatic(app);
   }
 
-  // 3. ARRANCAR EL SERVIDOR (CORREGIDO)
-  // Render nos da el puerto en process.env.PORT (usualmente 10000)
+  await bootstrapSystemAdmin();
+
+  // Render sets PORT. Locally it comes from .env, otherwise 5000.
+  // The Vite dev server listens on 5173 and proxies to this same port.
   const PORT = process.env.PORT || 5000;
-  
-  // CORRECCIÓN: Como registerRoutes no devuelve nada, usamos 'app' directamente.
+
   app.listen(Number(PORT), "0.0.0.0", () => {
     console.log(`✅ Servidor escuchando en el puerto ${PORT}`);
   });
-})();
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exit(1);
+});

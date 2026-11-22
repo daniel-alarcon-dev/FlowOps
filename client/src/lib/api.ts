@@ -10,6 +10,10 @@ async function fetchAPI(endpoint: string, options?: RequestInit) {
     credentials: 'include',
   });
 
+  if (response.status === 401 && !endpoint.startsWith("/auth/login") && !endpoint.startsWith("/auth/register")) {
+    window.dispatchEvent(new Event("flowops:unauthorized"));
+  }
+
   if (!response.ok) {
     const error = await response.json().catch(() => ({ message: 'Request failed' }));
     throw new Error(error.message || 'Request failed');
@@ -159,8 +163,6 @@ export const api = {
       }),
     delete: (id: string) =>
       fetchAPI(`/menu/${id}`, { method: 'DELETE' }),
-    getIngredients: (id: string) =>
-      fetchAPI(`/menu/${id}/ingredients`),
     addIngredient: (id: string, data: any) =>
       fetchAPI(`/menu/${id}/ingredients`, {
         method: 'POST',

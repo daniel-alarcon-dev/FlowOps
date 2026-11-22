@@ -22,7 +22,8 @@ import { cn } from '@/lib/utils';
 
 export default function Sales() {
   const { data: menu = [] } = useMenu();
-  const { data: salesHistory = [] } = useSales();
+  const { data: salesData, isLoading: salesLoading, isError: salesError } = useSales();
+  const salesHistory = salesData?.sales ?? [];
   const { data: inventoryLogs = [] } = useInventoryLogs(); 
   const createSaleMutation = useCreateSale();
   const { toast } = useToast();
@@ -131,19 +132,28 @@ export default function Sales() {
   };
 
   const handleSubmit = async () => {
-    const itemsSold = Object.entries(quantities).filter(([_, qty]) => qty > 0);
-    if (itemsSold.length === 0) return;
-    let successCount = 0;
-    for (const [menuId, qty] of itemsSold) {
-      try { await createSaleMutation.mutateAsync({ menuItemId: menuId, quantitySold: qty }); successCount++; } catch (e) { console.error(e); }
+    const lines = Object.entries(quantities)
+      .filter(([, qty]) => qty > 0)
+      .map(([menuItemId, quantitySold]) => ({ menuItemId, quantitySold }));
+    if (lines.length === 0) return;
+    try {
+      await createSaleMutation.mutateAsync({ lines });
+      setQuantities({});
+      toast({ title: "Sales Recorded", description: `Updated stock for ${lines.length} items.`, variant: "default" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to record sale";
+      toast({ title: "Sale failed", description: message, variant: "destructive" });
     }
-    setQuantities({}); 
-    toast({ title: "Sales Recorded", description: `Updated stock for ${successCount} items.`, variant: "default" });
   };
 
   return (
     <Layout title="Sales & Analytics" showBack={true}>
       <div className="space-y-8 pb-24">
+        {salesLoading && <p className="text-sm text-muted-foreground">Loading sales...</p>}
+        {salesError && <p className="text-sm text-red-400">Sales could not be loaded.</p>}
+        {!salesLoading && !salesError && salesHistory.length === 0 && (
+          <p className="text-sm text-muted-foreground">No sales in this range.</p>
+        )}
         
         {/* === SECTION 1: DISH PERFORMANCE === */}
         <section className="bg-black/20 rounded-[24px] border border-white/5 overflow-hidden">

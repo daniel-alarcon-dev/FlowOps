@@ -1,7 +1,8 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, timestamp, boolean, integer, real, json } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, timestamp, boolean, integer, real, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
+import { establishmentSchema } from "./access";
 import { relations } from "drizzle-orm";
 
 // 1. DEFINIR LOS ROLES
@@ -29,7 +30,9 @@ export const users = pgTable("users", {
   isSystemAdmin: boolean("is_system_admin").notNull().default(false),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   avatarUrl: text("avatar_url"),
-});
+}, (table) => ({
+  establishmentIdx: index("users_establishment_idx").on(table.establishment),
+}));
 
 
 export const insertUserSchema = createInsertSchema(users).omit({
@@ -37,8 +40,79 @@ export const insertUserSchema = createInsertSchema(users).omit({
   createdAt: true,
 });
 
-export type InsertUser = z.infer<typeof insertUserSchema>;
+export type InsertUser = typeof users.$inferInsert;
 export type User = typeof users.$inferSelect;
+
+const requiredText = z.string().trim().min(1);
+
+export const userRoleSchema = z.enum([
+  ROLES.ADMIN,
+  ROLES.MANAGER,
+  ROLES.SUPERVISOR,
+  ROLES.LEAD,
+  ROLES.EMPLOYEE,
+]);
+
+const optionalPhone = z
+  .string()
+  .trim()
+  .optional()
+  .transform((value) => (value ? value : undefined));
+
+function withAtLeastOneField<T extends z.ZodRawShape>(schema: z.ZodObject<T>) {
+  return schema.strict().refine((value) => Object.keys(value).length > 0, {
+    message: "At least one field is required",
+  });
+}
+
+/**
+ * Client allowlists for user writes. `status` and `isSystemAdmin` are never
+ * accepted. `role` is accepted only when an admin assigns it.
+ */
+export const registerUserSchema = z
+  .object({
+    name: requiredText,
+    email: requiredText,
+    username: requiredText,
+    password: z.string().min(8).max(200),
+    establishment: establishmentSchema,
+    phoneNumber: optionalPhone,
+  })
+  .strict();
+
+export const adminCreateUserSchema = z
+  .object({
+    name: requiredText,
+    email: requiredText,
+    username: requiredText,
+    password: z.string().min(8).max(200),
+    role: userRoleSchema,
+    establishment: requiredText,
+  })
+  .strict();
+
+const userProfileUpdateFields = {
+  name: requiredText.optional(),
+  email: requiredText.optional(),
+};
+
+export const updateUserSchema = withAtLeastOneField(z.object(userProfileUpdateFields));
+
+const managerAssignableRoleSchema = z.enum([ROLES.EMPLOYEE, ROLES.LEAD, ROLES.MANAGER]);
+
+export const managerUpdateUserSchema = withAtLeastOneField(
+  z.object({
+    ...userProfileUpdateFields,
+    role: managerAssignableRoleSchema.optional(),
+  }),
+);
+
+export const adminUpdateUserSchema = withAtLeastOneField(
+  z.object({
+    ...userProfileUpdateFields,
+    role: userRoleSchema.optional(),
+  }),
+);
 
 
 // ============ INVENTORY (ACTUALIZADO) ============
@@ -62,14 +136,16 @@ export const inventory = pgTable("inventory", {
   lastUpdated: timestamp("last_updated").defaultNow().notNull(),
   updatedBy: text("updated_by").notNull(),
   lowComment: text("low_comment"),
-});
+}, (table) => ({
+  establishmentIdx: index("inventory_establishment_idx").on(table.establishment),
+}));
 
 export const insertInventorySchema = createInsertSchema(inventory).omit({
   id: true,
   lastUpdated: true,
 });
 
-export type InsertInventory = z.infer<typeof insertInventorySchema>;
+export type InsertInventory = typeof inventory.$inferInsert;
 export type Inventory = typeof inventory.$inferSelect;
 
 
@@ -81,13 +157,17 @@ export const equipment = pgTable("equipment", {
   status: text("status").notNull().default('Working'), // 'Working' | 'Attention' | 'Broken'
   establishment: text("establishment").notNull(),
   lastIssue: text("last_issue"),
-});
+  location: text("location"),
+  notes: text("notes"),
+}, (table) => ({
+  establishmentIdx: index("equipment_establishment_idx").on(table.establishment),
+}));
 
 export const insertEquipmentSchema = createInsertSchema(equipment).omit({
   id: true,
 });
 
-export type InsertEquipment = z.infer<typeof insertEquipmentSchema>;
+export type InsertEquipment = typeof equipment.$inferInsert;
 export type Equipment = typeof equipment.$inferSelect;
 
 // ============ CHECKLIST ITEMS ============
@@ -107,7 +187,7 @@ export const insertChecklistItemSchema = createInsertSchema(checklistItems).omit
   id: true,
 });
 
-export type InsertChecklistItem = z.infer<typeof insertChecklistItemSchema>;
+export type InsertChecklistItem = typeof checklistItems.$inferInsert;
 export type ChecklistItem = typeof checklistItems.$inferSelect;
 
 // ============ WEEKLY TASKS ============
@@ -125,7 +205,7 @@ export const insertWeeklyTaskSchema = createInsertSchema(weeklyTasks).omit({
   id: true,
 });
 
-export type InsertWeeklyTask = z.infer<typeof insertWeeklyTaskSchema>;
+export type InsertWeeklyTask = typeof weeklyTasks.$inferInsert;
 export type WeeklyTask = typeof weeklyTasks.$inferSelect;
 
 // ============ TASK COMPLETIONS (History) ============
@@ -142,7 +222,7 @@ export const insertTaskCompletionSchema = createInsertSchema(taskCompletions).om
   completedAt: true,
 });
 
-export type InsertTaskCompletion = z.infer<typeof insertTaskCompletionSchema>;
+export type InsertTaskCompletion = typeof taskCompletions.$inferInsert;
 export type TaskCompletion = typeof taskCompletions.$inferSelect;
 
 // ============ CHAT MESSAGES ============
@@ -161,7 +241,7 @@ export const insertChatMessageSchema = createInsertSchema(chatMessages).omit({
   timestamp: true,
 });
 
-export type InsertChatMessage = z.infer<typeof insertChatMessageSchema>;
+export type InsertChatMessage = typeof chatMessages.$inferInsert;
 export type ChatMessage = typeof chatMessages.$inferSelect;
 
 // ============ TIMELINE EVENTS ============
@@ -182,7 +262,7 @@ export const insertTimelineEventSchema = createInsertSchema(timelineEvents).omit
   timestamp: true,
 });
 
-export type InsertTimelineEvent = z.infer<typeof insertTimelineEventSchema>;
+export type InsertTimelineEvent = typeof timelineEvents.$inferInsert;
 export type TimelineEvent = typeof timelineEvents.$inferSelect;
 
 // ============ MENU ITEMS ============
@@ -197,7 +277,7 @@ export const insertMenuItemSchema = createInsertSchema(menuItems).omit({
   id: true,
 });
 
-export type InsertMenuItem = z.infer<typeof insertMenuItemSchema>;
+export type InsertMenuItem = typeof menuItems.$inferInsert;
 export type MenuItem = typeof menuItems.$inferSelect;
 
 // ============ INGREDIENTS (ACTUALIZADO) ============
@@ -206,7 +286,7 @@ export const ingredients = pgTable("ingredients", {
   menuItemId: varchar("menu_item_id").notNull().references(() => menuItems.id, { onDelete: 'cascade' }),
   
   // --- NUEVO CAMPO: EL LINK AL INVENTARIO ---
-  inventoryItemId: varchar("inventory_item_id").references(() => inventory.id), 
+  inventoryItemId: varchar("inventory_item_id").references(() => inventory.id, { onDelete: "set null" }), 
   // ------------------------------------------
 
   name: text("name").notNull(),
@@ -219,7 +299,7 @@ export const insertIngredientSchema = createInsertSchema(ingredients).omit({
   id: true,
 });
 
-export type InsertIngredient = z.infer<typeof insertIngredientSchema>;
+export type InsertIngredient = typeof ingredients.$inferInsert;
 export type Ingredient = typeof ingredients.$inferSelect;
 
 
@@ -241,29 +321,40 @@ export const insertNotificationSchema = createInsertSchema(notifications).omit({
   createdAt: true,
 });
 
-export type InsertNotification = z.infer<typeof insertNotificationSchema>;
+export type InsertNotification = typeof notifications.$inferInsert;
 export type Notification = typeof notifications.$inferSelect;
-export const session = pgTable("session", {
-  sid: varchar("sid").primaryKey(),
-  sess: json("sess").notNull(),
-  expire: timestamp("expire").notNull(),
-});
+
+// The `session` table belongs to connect-pg-simple (createTableIfMissing),
+// including its IDX_session_expire index. Drizzle must not manage it, or a
+// migration would fight that table on every deploy.
 
 // ============ SALES (NUEVA TABLA) ============
 export const sales = pgTable("sales", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  menuItemId: varchar("menu_item_id").references(() => menuItems.id),
+  menuItemId: varchar("menu_item_id").references(() => menuItems.id, { onDelete: "set null" }),
   quantitySold: integer("quantity_sold").notNull(), // Ej: 3
   date: timestamp("date").defaultNow().notNull(),
   establishment: text("establishment").notNull(), // Importante para filtrar por local
-});
+}, (table) => ({
+  establishmentIdx: index("sales_establishment_idx").on(table.establishment),
+  dateIdx: index("sales_date_idx").on(table.date),
+}));
 
 export const insertSaleSchema = createInsertSchema(sales).omit({
   id: true,
   date: true,
 });
 
-export type InsertSale = z.infer<typeof insertSaleSchema>;
+export const saleLineSchema = z.object({
+  menuItemId: z.string().trim().min(1).max(80),
+  quantitySold: z.number().int().positive().max(10000),
+}).strict();
+
+export const saleBatchSchema = z.object({
+  lines: z.array(saleLineSchema).min(1).max(100),
+}).strict();
+
+export type InsertSale = typeof sales.$inferInsert;
 export type Sale = typeof sales.$inferSelect;
 
 // ============ INVENTORY LOGS (NUEVA TABLA) ============
@@ -275,12 +366,15 @@ export const inventoryLogs = pgTable("inventory_logs", {
   user: text("user").notNull(),        // Quién hizo el cambio
   date: timestamp("date").defaultNow().notNull(),
   establishment: text("establishment").notNull(),
-});
+  inventoryItemId: varchar("inventory_item_id").references(() => inventory.id, { onDelete: "set null" }),
+}, (table) => ({
+  establishmentIdx: index("inventory_logs_establishment_idx").on(table.establishment),
+}));
 
 export const insertInventoryLogSchema = createInsertSchema(inventoryLogs).omit({
   id: true,
   date: true,
 });
 
-export type InsertInventoryLog = z.infer<typeof insertInventoryLogSchema>;
+export type InsertInventoryLog = typeof inventoryLogs.$inferInsert;
 export type InventoryLog = typeof inventoryLogs.$inferSelect;

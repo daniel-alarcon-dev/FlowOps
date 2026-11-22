@@ -1,11 +1,16 @@
-import multer from 'multer';
-import path from 'path';
-import fs from 'fs';
-import type { Express, Request, Response } from "express";
+import { randomBytes } from "crypto";
+import multer from "multer";
+import path from "path";
+import fs from "fs";
+import type { Express, NextFunction, Request, Response } from "express";
 import { storage } from "./storage";
 import bcrypt from "bcrypt";
 import { 
-  insertUserSchema, 
+  registerUserSchema,
+  adminCreateUserSchema,
+  updateUserSchema,
+  managerUpdateUserSchema,
+  adminUpdateUserSchema,
   insertInventorySchema,
   insertEquipmentSchema,
   insertChecklistItemSchema,
@@ -17,14 +22,30 @@ import {
   insertIngredientSchema,
   sales,              
   insertSaleSchema,
-  insertInventoryLogSchema
+  insertInventoryLogSchema,
+  saleBatchSchema,
+  inventoryLogs
 } from "@shared/schema";
 import { z } from "zod";
 import { db } from "./db";
-import { eq, and, asc, sql } from "drizzle-orm";
-import { users, inventory, equipment, checklistItems, weeklyTasks, taskCompletions, chatMessages, timelineEvents, menuItems, ingredients, notifications } from "@shared/schema";
+import { eq, and, asc, desc, gte, lte, inArray, sql } from "drizzle-orm";
+import { canAccessEstablishment, convertQuantity, hasLowerRank, isGlobalUser } from "@shared/access";
+import { asyncHandler } from "./errors";
+import { users, inventory, equipment, checklistItems, weeklyTasks, taskCompletions, chatMessages, timelineEvents, menuItems, ingredients, notifications, type User } from "@shared/schema";
 
 const SALT_ROUNDS = 10;
+
+/** Express 5 types route params as `string | string[]`. These routes use a single `:id`. */
+function routeParam(req: Request, name: string): string {
+  const value = req.params[name];
+  if (typeof value === "string" && value.length > 0) return value;
+  if (Array.isArray(value) && typeof value[0] === "string" && value[0].length > 0) return value[0];
+  const error = new Error("Missing route parameter") as Error & { statusCode: number };
+  error.statusCode = 400;
+  throw error;
+}
+
+type PublicUser = Omit<User, "password">;
 
 interface SessionUser {
   id: string;
@@ -36,8 +57,14 @@ interface SessionUser {
 
 declare module 'express-session' {
   interface SessionData {
-    user?: SessionUser;
+    user?: PublicUser;
   }
+}
+
+/** User shape safe for JSON responses and the session store. The password hash stays on the server. */
+function toPublicUser(user: User): PublicUser {
+  const { password: _password, ...publicUser } = user;
+  return publicUser;
 }
 
 function isSystemAdminUser(user: SessionUser | undefined): boolean {
@@ -48,12 +75,84 @@ function canManageUsers(user: SessionUser | undefined): boolean {
   return user?.role === 'manager' || isSystemAdminUser(user);
 }
 
+function isGlobalAdmin(user: SessionUser | undefined): boolean {
+  return isGlobalUser(user);
+}
+
+function canAssignUserRole(user: SessionUser | undefined): boolean {
+  return isGlobalAdmin(user) || user?.role === 'manager';
+}
+
+function canReviewUser(actor: SessionUser, target: { role: string; establishment: string; isSystemAdmin: boolean }): boolean {
+  if (target.isSystemAdmin && !isSystemAdminUser(actor)) return false;
+  if (!canAccessEstablishment(actor, target.establishment)) return false;
+  if (isSystemAdminUser(actor)) return true;
+  return hasLowerRank(actor.role, target.role);
+}
+
+function toVisibleUser(user: User, actor: SessionUser) {
+  const publicUser = toPublicUser(user);
+  if (actor.id === user.id || isGlobalUser(actor) || canManageUsers(actor)) return publicUser;
+  const { email: _email, phoneNumber: _phone, ...rest } = publicUser;
+  return rest;
+}
+
+function requireAuth(req: Request, res: Response, next: NextFunction): void {
+  if (!req.session.user) {
+    res.status(401).json({ message: "Not authenticated" });
+    return;
+  }
+  next();
+}
+
+const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff]);
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const AVATAR_MAX_BYTES = 5 * 1024 * 1024;
+
+type AllowedImageExtension = ".jpg" | ".png" | ".webp";
+
+function hasSignature(buffer: Buffer, signature: Buffer): boolean {
+  return buffer.length >= signature.length && buffer.subarray(0, signature.length).equals(signature);
+}
+
+/** JPEG, PNG, or WebP from the file bytes. The client MIME type and name are ignored. */
+function extensionFromImageSignature(buffer: Buffer): AllowedImageExtension | null {
+  if (hasSignature(buffer, JPEG_SIGNATURE)) return ".jpg";
+  if (hasSignature(buffer, PNG_SIGNATURE)) return ".png";
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(0, 4).toString("ascii") === "RIFF" &&
+    buffer.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return ".webp";
+  }
+  return null;
+}
+
 export async function registerRoutes(app: Express): Promise<void> {
+  app.use("/api", asyncHandler(async (req, res, next) => {
+    if (req.path === "/auth/login" || req.path === "/auth/register" || req.path === "/api/auth/login" || req.path === "/api/auth/register") {
+      next();
+      return;
+    }
+    if (!req.session.user) {
+      res.status(401).json({ message: "Not authenticated" });
+      return;
+    }
+    const fresh = await storage.getUser(req.session.user.id);
+    if (!fresh || fresh.status !== "active") {
+      req.session.user = undefined;
+      res.status(401).json({ message: "Not authenticated" });
+      return;
+    }
+    req.session.user = toPublicUser(fresh);
+    next();
+  }));
 
   // ==================== AUTH ROUTES ====================
   app.post("/api/auth/register", async (req: Request, res: Response) => {
     try {
-      const validatedData = insertUserSchema.parse(req.body);
+      const validatedData = registerUserSchema.parse(req.body);
 
       const existingUser = await storage.getUserByUsername(validatedData.username);
       const existingEmail = await storage.getUserByEmail(validatedData.email);
@@ -64,10 +163,15 @@ export async function registerRoutes(app: Express): Promise<void> {
       const hashedPassword = await bcrypt.hash(validatedData.password, SALT_ROUNDS);
 
       const user = await storage.createUser({
-        ...validatedData,
+        name: validatedData.name,
+        email: validatedData.email,
+        username: validatedData.username,
         password: hashedPassword,
+        establishment: validatedData.establishment,
+        phoneNumber: validatedData.phoneNumber,
         status: 'pending',
-        role: 'employee'
+        role: 'employee',
+        isSystemAdmin: false,
       });
 
       try {
@@ -84,8 +188,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         }
       } catch {}
 
-      const { password, ...userWithoutPassword } = user;
-      res.status(201).json(userWithoutPassword);
+      res.status(201).json(toPublicUser(user));
     } catch (error) {
       if (error instanceof z.ZodError) return res.status(400).json({ errors: error.errors });
       res.status(500).json({ message: "Registration failed" });
@@ -107,16 +210,9 @@ export async function registerRoutes(app: Express): Promise<void> {
       if (user.status === 'pending') return res.status(403).json({ message: "Account pending approval" });
       if (user.status === 'removed') return res.status(403).json({ message: "Account deactivated" });
 
-      req.session.user = {
-        id: user.id,
-        name: user.name,
-        role: user.role,
-        establishment: user.establishment,
-        isSystemAdmin: user.isSystemAdmin
-      };
-
-      const { password: _, ...userWithoutPassword } = user;
-      res.json(userWithoutPassword);
+      const publicUser = toPublicUser(user);
+      req.session.user = publicUser;
+      res.json(publicUser);
     } catch {
       res.status(500).json({ message: "Login failed" });
     }
@@ -130,66 +226,50 @@ export async function registerRoutes(app: Express): Promise<void> {
     if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
     const user = await storage.getUser(req.session.user.id);
     if (!user) return res.status(404).json({ message: "User not found" });
-    const { password, ...userWithoutPassword } = user;
-    res.json(userWithoutPassword);
+    res.json(toPublicUser(user));
   });
 
   // ==================== USERS MANAGEMENT ====================
-  const APPROVAL_HIERARCHY: Record<string, string[]> = {
-    admin: ['manager'],
-    manager: ['supervisor'],
-    supervisor: ['lead'],
-    lead: ['employee'],
-    employee: []
-  };
-
   // List all users
   app.get("/api/users", async (req, res) => {
-    if (!req.session.user) return res.sendStatus(401);
+    const actor = req.session.user;
+    if (!actor) return res.sendStatus(401);
     let query = db.select().from(users);
-    if (!req.session.user.isSystemAdmin && req.session.user.role !== 'admin') {
-      query.where(eq(users.establishment, req.session.user.establishment));
+    if (!isGlobalUser(actor)) {
+      query.where(eq(users.establishment, actor.establishment));
     }
     const allUsers = await query;
-    res.json(allUsers.map(({ password, ...u }) => u));
+    res.json(allUsers.map((user) => toVisibleUser(user, actor)));
   });
 
   // List pending users
   app.get("/api/users/pending", async (req, res) => {
-    if (!req.session.user) return res.sendStatus(401);
-    const currentUserRole = req.session.user.role;
-    const currentEst = req.session.user.establishment;
+    const actor = req.session.user;
+    if (!actor) return res.sendStatus(401);
 
     const conditions = [eq(users.status, 'pending')];
-    if (!req.session.user.isSystemAdmin && currentUserRole !== 'admin') {
-      conditions.push(eq(users.establishment, currentEst));
+    if (!isGlobalUser(actor)) {
+      conditions.push(eq(users.establishment, actor.establishment));
     }
 
     const pendingUsers = await db.select().from(users).where(and(...conditions));
-    const rolesICanApprove = APPROVAL_HIERARCHY[req.session.user.role] || [];
-    const filteredUsers = pendingUsers.filter(u => rolesICanApprove.includes(u.role));
-    res.json(filteredUsers);
+    const filteredUsers = pendingUsers.filter((user) => canReviewUser(actor, user));
+    res.json(filteredUsers.map((user) => toVisibleUser(user, actor)));
   });
 
-  // Approve user
+  // Approve user. The role already stored on the account is the one being approved.
   app.post("/api/users/:id/approve", async (req, res) => {
-    if (!req.session.user) return res.sendStatus(401);
-    const [targetUser] = await db.select().from(users).where(eq(users.id, req.params.id)).limit(1);
-    if (!targetUser) return res.status(404).send("User not found");
-
-    const rolesICanApprove = APPROVAL_HIERARCHY[req.session.user.role] || [];
-    if (!rolesICanApprove.includes(targetUser.role)) return res.status(403).json({ message: "Cannot approve this user" });
-
-    if (!req.session.user.isSystemAdmin && req.session.user.role !== 'admin') {
-      if (targetUser.establishment !== req.session.user.establishment) return res.status(403).json({ message: "Cannot approve users from another establishment" });
-    }
+    const actor = req.session.user;
+    if (!actor) return res.sendStatus(401);
+    const [targetUser] = await db.select().from(users).where(eq(users.id, routeParam(req, "id"))).limit(1);
+    if (!targetUser || !canReviewUser(actor, targetUser)) return res.status(404).json({ message: "User not found" });
 
     await db.update(users).set({ status: 'active' }).where(eq(users.id, targetUser.id));
     await storage.createTimelineEvent({
       text: `Approved ${targetUser.name} as ${targetUser.role}`,
       establishment: targetUser.establishment,
-      author: req.session.user.name,
-      authorRole: req.session.user.role,
+      author: actor.name,
+      authorRole: actor.role,
       type: 'success'
     });
 
@@ -198,82 +278,185 @@ export async function registerRoutes(app: Express): Promise<void> {
 
   // Reject user
   app.delete("/api/users/:id/reject", async (req, res) => {
-    if (!req.session.user) return res.sendStatus(401);
-    const [targetUser] = await db.select().from(users).where(eq(users.id, req.params.id)).limit(1);
-    if (!targetUser) return res.status(404).send("User not found");
-
-    const rolesICanApprove = APPROVAL_HIERARCHY[req.session.user.role] || [];
-    if (!rolesICanApprove.includes(targetUser.role)) return res.status(403).json({ message: "Cannot reject this user" });
+    const actor = req.session.user;
+    if (!actor) return res.sendStatus(401);
+    const [targetUser] = await db.select().from(users).where(eq(users.id, routeParam(req, "id"))).limit(1);
+    if (!targetUser || !canReviewUser(actor, targetUser)) return res.status(404).json({ message: "User not found" });
 
     await db.update(users).set({ status: 'removed' }).where(eq(users.id, targetUser.id));
     res.json({ message: "User rejected" });
   });
 
-  // --- CONFIGURACIÓN DE SUBIDA DE IMÁGENES (MULTER) ---
-  // Aseguramos que la carpeta uploads existe
-  const uploadDir = path.join(process.cwd(), 'uploads');
+  app.patch("/api/users/:id", async (req: Request, res: Response) => {
+    if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
+
+    const actor = req.session.user;
+    const targetId = routeParam(req, "id");
+
+    try {
+      const [existing] = await db.select().from(users).where(eq(users.id, targetId)).limit(1);
+      if (!existing) return res.status(404).json({ message: "User not found" });
+
+      if (existing.isSystemAdmin && !isSystemAdminUser(actor)) {
+        return res.status(403).json({ message: "Only a system admin can edit a system admin" });
+      }
+
+      if (!isGlobalAdmin(actor)) {
+        if (existing.establishment !== actor.establishment) {
+          return res.status(403).json({ message: "Cannot update users from another establishment" });
+        }
+        if (!hasLowerRank(actor.role, existing.role)) {
+          return res.status(403).json({ message: "You can only edit users of a lower rank" });
+        }
+      }
+
+      const schema = isGlobalAdmin(actor)
+        ? adminUpdateUserSchema
+        : canAssignUserRole(actor)
+          ? managerUpdateUserSchema
+          : updateUserSchema;
+      const updates = schema.parse(req.body);
+
+      if ("role" in updates && updates.role !== undefined && actor.id === targetId) {
+        return res.status(403).json({ message: "You cannot change your own role" });
+      }
+
+      if (updates.email && updates.email !== existing.email) {
+        const existingEmail = await storage.getUserByEmail(updates.email);
+        if (existingEmail) return res.status(400).json({ message: "Email already exists" });
+      }
+
+      const user = await storage.updateUser(targetId, updates);
+      if (!user) return res.status(404).json({ message: "User not found" });
+
+      res.json(toPublicUser(user));
+    } catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ errors: error.errors });
+      console.error("User update error:", error);
+      res.status(500).json({ message: "Failed to update user" });
+    }
+  });
+
+  app.delete("/api/users/:id", async (req, res) => {
+    const actor = req.session.user;
+    if (!actor) return res.status(401).json({ message: "Not authenticated" });
+    const [existing] = await db.select().from(users).where(eq(users.id, routeParam(req, "id"))).limit(1);
+    if (!existing || !canReviewUser(actor, existing) || existing.id === actor.id) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    await db.update(users).set({ status: "removed" }).where(eq(users.id, existing.id));
+    res.json({ message: "User removed" });
+  });
+
+  const uploadDir = path.join(process.cwd(), "uploads");
   if (!fs.existsSync(uploadDir)) {
     fs.mkdirSync(uploadDir, { recursive: true });
   }
 
-  const storageConfig = multer.diskStorage({
-    destination: function (req, file, cb) {
-      cb(null, uploadDir)
-    },
-    filename: function (req, file, cb) {
-      // Nombre único: timestamp + extensión original
-      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-      cb(null, 'avatar-' + uniqueSuffix + path.extname(file.originalname));
-    }
+  // Keep the bytes in memory until the signature check passes, so a rejected
+  // SVG or HTML file is never written under the uploads directory.
+  const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: AVATAR_MAX_BYTES },
   });
 
-  const upload = multer({ 
-    storage: storageConfig,
-    limits: { fileSize: 5 * 1024 * 1024 }, // Límite de 5MB
-    fileFilter: (req, file, cb) => {
-        if (file.mimetype.startsWith('image/')) {
-            cb(null, true);
-        } else {
-            cb(new Error('Only images are allowed'));
-        }
-    }
-  });
+  function receiveAvatar(req: Request, res: Response, next: NextFunction): void {
+    upload.single("avatar")(req, res, (err: unknown) => {
+      if (!err) {
+        next();
+        return;
+      }
+      if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
+        res.status(400).json({ message: "Image too large (max 5MB)" });
+        return;
+      }
+      next(err);
+    });
+  }
 
-  // --- RUTA PARA SUBIR AVATAR ---
-  app.post('/api/user/avatar', upload.single('avatar'), async (req: any, res: Response) => {
-    if (!req.session.user) return res.status(401).send("Unauthorized");
-    if (!req.file) return res.status(400).send("No file uploaded");
+  app.post("/api/user/avatar", requireAuth, receiveAvatar, async (req: Request, res: Response) => {
+    const sessionUser = req.session.user;
+    if (!sessionUser) {
+      res.status(401).json({ message: "Not authenticated" });
+      return;
+    }
+    if (!req.file) {
+      res.status(400).json({ message: "No file uploaded" });
+      return;
+    }
+
+    const extension = extensionFromImageSignature(req.file.buffer);
+    if (!extension) {
+      res.status(400).json({ message: "Only JPEG, PNG and WebP images are allowed" });
+      return;
+    }
+
+    const filename = `avatar-${Date.now()}-${randomBytes(8).toString("hex")}${extension}`;
+    const filePath = path.join(uploadDir, filename);
+    const fileUrl = `/uploads/${filename}`;
 
     try {
-        // La URL será relativa al servidor
-        const fileUrl = `/uploads/${req.file.filename}`;
+      await fs.promises.writeFile(filePath, req.file.buffer);
 
-        // Actualizamos el usuario en la DB
-        const [updatedUser] = await db.update(users)
-            .set({ avatarUrl: fileUrl })
-            .where(eq(users.id, req.session.user.id))
-            .returning();
-        
-        // Actualizamos la sesión
-        req.session.user = updatedUser;
-            
-        res.json({ success: true, avatarUrl: fileUrl, user: updatedUser });
+      const [updatedUser] = await db.update(users)
+        .set({ avatarUrl: fileUrl })
+        .where(eq(users.id, sessionUser.id))
+        .returning();
+
+      if (!updatedUser) {
+        await fs.promises.unlink(filePath).catch(() => undefined);
+        res.status(404).json({ message: "User not found" });
+        return;
+      }
+
+      const publicUser = toPublicUser(updatedUser);
+      req.session.user = publicUser;
+
+      res.json({ success: true, avatarUrl: fileUrl, user: publicUser });
     } catch (error) {
-        console.error("Avatar upload error:", error);
-        res.status(500).send("Error uploading avatar");
+      await fs.promises.unlink(filePath).catch(() => undefined);
+      console.error("Avatar upload error:", error);
+      res.status(500).json({ message: "Error uploading avatar" });
     }
   });
   
+  const SHORT_ICON_MAX_LENGTH = 16;
+  const HTTPS_ICON_MAX_LENGTH = 2048;
+  const DATA_IMAGE_MAX_LENGTH = 2_000_000;
+
+  const inventoryEmojiSchema = z
+    .string()
+    .trim()
+    .min(1)
+    .max(DATA_IMAGE_MAX_LENGTH)
+    .refine((value) => {
+      const normalized = value.toLowerCase();
+      if (normalized.startsWith("https://")) return value.length <= HTTPS_ICON_MAX_LENGTH;
+      if (normalized.startsWith("data:image/")) return value.length <= DATA_IMAGE_MAX_LENGTH;
+      return value.length <= SHORT_ICON_MAX_LENGTH;
+    }, "Icon must be a short emoji or an https or data:image URL");
+
+  const inventoryPatchSchema = z.object({
+    emoji: inventoryEmojiSchema.optional(),
+    name: z.string().trim().min(1).max(120).optional(),
+    category: z.string().trim().max(80).nullable().optional(),
+    status: z.enum(["OK", "LOW", "OUT"]).optional(),
+    quantity: z.number().nonnegative().max(1_000_000).optional(),
+    unit: z.string().trim().min(1).max(40).optional(),
+    costPerUnit: z.number().nonnegative().max(1_000_000).nullable().optional(),
+    lowComment: z.string().trim().max(500).nullable().optional(),
+  }).strict();
+
   // ==================== INVENTORY ====================
   app.get("/api/inventory", async (req, res) => {
-    if (!req.session.user) return res.sendStatus(401);
+    const actor = req.session.user;
+    if (!actor) return res.sendStatus(401);
     let query = db.select().from(inventory);
-    if (!req.session.user.isSystemAdmin && req.session.user.role !== 'admin') {
-      query.where(eq(inventory.establishment, req.session.user.establishment));
+    if (!isGlobalUser(actor)) {
+      query.where(eq(inventory.establishment, actor.establishment));
     }
     query.orderBy(asc(inventory.name));
-    const items = await query;
-    res.json(items);
+    res.json(await query);
   });
 
   app.post("/api/inventory", async (req, res) => {
@@ -295,28 +478,61 @@ export async function registerRoutes(app: Express): Promise<void> {
   });
 
   app.patch("/api/inventory/:id", async (req, res) => {
-    if (!req.session.user) return res.sendStatus(401);
-    const item = await storage.updateInventoryItem(req.params.id, { ...req.body, lastUpdated: new Date(), updatedBy: req.session.user.name });
-    if (!item) return res.status(404).json({ message: "Item not found" });
-    
-    // Log status changes logic restored
-    if (req.body.status && (req.body.status === 'LOW' || req.body.status === 'OUT')) {
-      await storage.createTimelineEvent({
-        text: `${item.name} marked ${req.body.status}`,
-        establishment: req.session.user.establishment,
-        author: req.session.user.name,
-        authorRole: req.session.user.role,
-        type: req.body.status === 'OUT' ? 'alert' : 'warning',
-        comment: req.body.lowComment
+    const actor = req.session.user;
+    if (!actor) return res.sendStatus(401);
+    try {
+      const id = routeParam(req, "id");
+      const [existing] = await db.select().from(inventory).where(eq(inventory.id, id)).limit(1);
+      if (!existing || !canAccessEstablishment(actor, existing.establishment)) {
+        return res.status(404).json({ message: "Item not found" });
+      }
+      const updates = inventoryPatchSchema.parse(req.body);
+      const item = await storage.updateInventoryItem(id, {
+        ...updates,
+        lastUpdated: new Date(),
+        updatedBy: actor.name,
       });
-    }
+      if (!item) return res.status(404).json({ message: "Item not found" });
 
-    res.json(item);
+      if (updates.quantity !== undefined && updates.quantity !== existing.quantity) {
+        await storage.createInventoryLog({
+          itemName: item.name,
+          change: updates.quantity - Number(existing.quantity ?? 0),
+          reason: "Adjustment",
+          user: actor.name,
+          establishment: existing.establishment,
+          inventoryItemId: item.id,
+        });
+      }
+
+      if (updates.status === "LOW" || updates.status === "OUT") {
+        await storage.createTimelineEvent({
+          text: `${item.name} marked ${updates.status}`,
+          establishment: existing.establishment,
+          author: actor.name,
+          authorRole: actor.role,
+          type: updates.status === "OUT" ? "alert" : "warning",
+          comment: updates.lowComment ?? undefined,
+        });
+      }
+
+      res.json(item);
+    } catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ errors: error.errors });
+      console.error("Inventory update error:", error);
+      res.status(500).json({ message: "Failed to update inventory item" });
+    }
   });
 
   app.delete("/api/inventory/:id", async (req, res) => {
-    if (!req.session.user) return res.sendStatus(401);
-    await storage.deleteInventoryItem(req.params.id);
+    const actor = req.session.user;
+    if (!actor) return res.sendStatus(401);
+    const id = routeParam(req, "id");
+    const [existing] = await db.select().from(inventory).where(eq(inventory.id, id)).limit(1);
+    if (!existing || !canAccessEstablishment(actor, existing.establishment)) {
+      return res.status(404).json({ message: "Item not found" });
+    }
+    await storage.deleteInventoryItem(id);
     res.json({ message: "Inventory item deleted" });
   });
 
@@ -336,7 +552,8 @@ export async function registerRoutes(app: Express): Promise<void> {
       // Forzamos el establishment del usuario logueado por seguridad
       const logData = insertInventoryLogSchema.parse({
         ...req.body,
-        establishment: req.session.user.establishment
+        user: req.session.user.name,
+        establishment: req.session.user.establishment,
       });
       
       const log = await storage.createInventoryLog(logData);
@@ -389,7 +606,20 @@ export async function registerRoutes(app: Express): Promise<void> {
   
   app.patch("/api/equipment/:id", async (req: Request, res: Response) => {
     if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
-    const item = await storage.updateEquipmentItem(req.params.id, req.body);
+    const equipmentId = routeParam(req, "id");
+    const [existingEquipment] = await db.select().from(equipment).where(eq(equipment.id, equipmentId)).limit(1);
+    if (!existingEquipment || !canAccessEstablishment(req.session.user, existingEquipment.establishment)) {
+      return res.status(404).json({ message: "Item not found" });
+    }
+    const equipmentUpdates = z.object({
+      name: z.string().trim().min(1).max(120).optional(),
+      category: z.string().trim().max(80).nullable().optional(),
+      status: z.enum(["Working", "Attention", "Broken"]).optional(),
+      lastIssue: z.string().trim().max(500).nullable().optional(),
+      location: z.string().trim().max(120).nullable().optional(),
+      notes: z.string().trim().max(500).nullable().optional(),
+    }).strict().parse(req.body ?? {});
+    const item = await storage.updateEquipmentItem(equipmentId, equipmentUpdates);
     if (!item) return res.status(404).json({ message: "Item not found" });
     
     // Log status changes
@@ -427,7 +657,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   
   app.delete("/api/equipment/:id", async (req: Request, res: Response) => {
     if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
-    await storage.deleteEquipmentItem(req.params.id);
+    await storage.deleteEquipmentItem(routeParam(req, "id"));
     res.json({ message: "Equipment item deleted" });
   });
 
@@ -481,7 +711,7 @@ export async function registerRoutes(app: Express): Promise<void> {
       updates.completedAt = new Date();
     }
     
-    const item = await storage.updateChecklistItem(req.params.id, updates);
+    const item = await storage.updateChecklistItem(routeParam(req, "id"), updates);
     if (!item) return res.status(404).json({ message: "Item not found" });
     
     if (updates.completed === true) {
@@ -499,7 +729,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   
   app.delete("/api/checklists/:id", async (req: Request, res: Response) => {
     if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
-    await storage.deleteChecklistItem(req.params.id);
+    await storage.deleteChecklistItem(routeParam(req, "id"));
     res.json({ message: "Checklist item deleted" });
   });
 
@@ -514,11 +744,19 @@ export async function registerRoutes(app: Express): Promise<void> {
       tasks = await storage.getWeeklyTasksByEstablishment(req.session.user.establishment);
     }
 
-    // --- NUEVO CÓDIGO: BUSCAMOS EL HISTORIAL PARA CADA TAREA ---
-    const tasksWithHistory = await Promise.all(tasks.map(async (task) => {
-      // Usamos la función que ya existe en tu storage para buscar completados
-      const history = await storage.getTaskCompletions(task.id);
-      return { ...task, history }; // Devolvemos la tarea + su historial
+    const taskIds = tasks.map((task) => task.id);
+    const historyRows = taskIds.length === 0
+      ? []
+      : await db.select().from(taskCompletions).where(inArray(taskCompletions.taskId, taskIds)).orderBy(desc(taskCompletions.completedAt));
+    const historyByTask = new Map<string, typeof historyRows>();
+    for (const row of historyRows) {
+      const list = historyByTask.get(row.taskId) ?? [];
+      list.push(row);
+      historyByTask.set(row.taskId, list);
+    }
+    const tasksWithHistory = tasks.map((task) => ({
+      ...task,
+      history: (historyByTask.get(task.id) ?? []).slice(0, 20),
     }));
 
     res.json(tasksWithHistory);
@@ -560,7 +798,7 @@ export async function registerRoutes(app: Express): Promise<void> {
       updates.completedAt = new Date();
     }
     
-    const task = await storage.updateWeeklyTask(req.params.id, updates);
+    const task = await storage.updateWeeklyTask(routeParam(req, "id"), updates);
     if (!task) return res.status(404).json({ message: "Task not found" });
     
     res.json(task);
@@ -568,7 +806,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   
   app.delete("/api/tasks/:id", async (req: Request, res: Response) => {
     if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
-    await storage.deleteWeeklyTask(req.params.id);
+    await storage.deleteWeeklyTask(routeParam(req, "id"));
     res.json({ message: "Task deleted" });
   });
 
@@ -577,17 +815,22 @@ export async function registerRoutes(app: Express): Promise<void> {
     if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
     try {
       const { photo } = req.body;
-      if (!photo) {
+      if (typeof photo !== "string" || photo.length === 0 || photo.length > 2_000_000) {
         return res.status(400).json({ message: "Photo is required" });
+      }
+      const taskId = routeParam(req, "id");
+      const [existingTask] = await db.select().from(weeklyTasks).where(eq(weeklyTasks.id, taskId)).limit(1);
+      if (!existingTask || !canAccessEstablishment(req.session.user, existingTask.establishment)) {
+        return res.status(404).json({ message: "Task not found" });
       }
       
       const completion = await storage.createTaskCompletion({
-        taskId: req.params.id,
+        taskId,
         completedBy: req.session.user.name,
         photo
       });
       
-      const task = await storage.updateWeeklyTask(req.params.id, { 
+      const task = await storage.updateWeeklyTask(routeParam(req, "id"), { 
         completed: true,
         completedAt: new Date()
       });
@@ -613,7 +856,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   
   app.get("/api/tasks/:id/completions", async (req: Request, res: Response) => {
     if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
-    const completions = await storage.getTaskCompletions(req.params.id);
+    const completions = await storage.getTaskCompletions(routeParam(req, "id"));
     res.json(completions);
   });
 
@@ -742,7 +985,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     if (name) updates.name = name;
     if (category) updates.category = category;
     
-    const item = await storage.updateMenuItem(req.params.id, updates);
+    const item = await storage.updateMenuItem(routeParam(req, "id"), updates);
     if (!item) return res.status(404).json({ message: "Menu item not found" });
     res.json(item);
   });
@@ -751,7 +994,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     if (!req.session.user || (!isSystemAdminUser(req.session.user) && req.session.user.role !== 'manager')) {
       return res.status(403).json({ message: "Only managers can delete menu items" });
     }
-    await storage.deleteMenuItem(req.params.id);
+    await storage.deleteMenuItem(routeParam(req, "id"));
     res.json({ message: "Menu item deleted" });
   });
 
@@ -763,7 +1006,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     try {
       const data = insertIngredientSchema.parse({
         ...req.body,
-        menuItemId: req.params.menuItemId
+        menuItemId: routeParam(req, "menuItemId")
       });
       const ingredient = await storage.createIngredient(data);
       res.status(201).json(ingredient);
@@ -777,7 +1020,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     if (!req.session.user || (!isSystemAdminUser(req.session.user) && req.session.user.role !== 'manager')) {
       return res.status(403).json({ message: "Only managers can update ingredients" });
     }
-    const ingredient = await storage.updateIngredient(req.params.id, req.body);
+    const ingredient = await storage.updateIngredient(routeParam(req, "id"), req.body);
     if (!ingredient) return res.status(404).json({ message: "Ingredient not found" });
     res.json(ingredient);
   });
@@ -786,7 +1029,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     if (!req.session.user || (!isSystemAdminUser(req.session.user) && req.session.user.role !== 'manager')) {
       return res.status(403).json({ message: "Only managers can delete ingredients" });
     }
-    await storage.deleteIngredient(req.params.id);
+    await storage.deleteIngredient(routeParam(req, "id"));
     res.json({ message: "Ingredient deleted" });
   });
 
@@ -805,7 +1048,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   
   app.post("/api/notifications/:id/read", async (req: Request, res: Response) => {
     if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
-    const notification = await storage.markNotificationAsRead(req.params.id);
+    const notification = await storage.markNotificationAsRead(routeParam(req, "id"));
     if (!notification) return res.status(404).json({ message: "Notification not found" });
     res.json(notification);
   });
@@ -824,42 +1067,38 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
     
     try {
-      const { username, email, name, password, role, establishment } = req.body;
-      
-      if (!username || !email || !name || !password || !role || !establishment) {
-        return res.status(400).json({ message: "All fields are required" });
-      }
-      
-      const existingUser = await storage.getUserByUsername(username);
-      const existingEmail = await storage.getUserByEmail(email);
+      const input = adminCreateUserSchema.parse(req.body);
+
+      const existingUser = await storage.getUserByUsername(input.username);
+      const existingEmail = await storage.getUserByEmail(input.email);
       
       if (existingUser) return res.status(400).json({ message: "Username already exists" });
       if (existingEmail) return res.status(400).json({ message: "Email already exists" });
       
-      const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
+      const hashedPassword = await bcrypt.hash(input.password, SALT_ROUNDS);
       
       const user = await storage.createUser({
-        username,
-        email,
-        name,
+        username: input.username,
+        email: input.email,
+        name: input.name,
         password: hashedPassword,
-        role,
-        establishment,
+        role: input.role,
+        establishment: input.establishment,
         status: 'active',
-        isSystemAdmin: false
+        isSystemAdmin: false,
       });
       
       await storage.createTimelineEvent({
-        text: `User created by Admin: ${user.name} as ${role}`,
+        text: `User created by Admin: ${user.name} as ${user.role}`,
         establishment: user.establishment,
         author: req.session.user.name,
         authorRole: 'admin',
         type: 'success'
       });
       
-      const { password: _, ...userWithoutPassword } = user;
-      res.status(201).json(userWithoutPassword);
+      res.status(201).json(toPublicUser(user));
     } catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ errors: error.errors });
       console.error("User creation error:", error);
       res.status(500).json({ message: "Failed to create user" });
     }
@@ -915,52 +1154,119 @@ export async function registerRoutes(app: Express): Promise<void> {
  
   // ==================== SALES & STOCK DEDUCTION ====================
   app.get("/api/sales", async (req: Request, res: Response) => {
-    if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
-    // Historial de ventas (últimas 50)
-    const salesHistory = await db.select().from(sales).orderBy(sql`${sales.date} DESC`).limit(50);
-    res.json(salesHistory);
+    const actor = req.session.user;
+    if (!actor) return res.status(401).json({ message: "Not authenticated" });
+
+    const conditions = [];
+    if (!isGlobalUser(actor)) conditions.push(eq(sales.establishment, actor.establishment));
+    if (typeof req.query.from === "string" && !Number.isNaN(Date.parse(req.query.from))) {
+      conditions.push(gte(sales.date, new Date(req.query.from)));
+    }
+    if (typeof req.query.to === "string" && !Number.isNaN(Date.parse(req.query.to))) {
+      conditions.push(lte(sales.date, new Date(req.query.to)));
+    }
+
+    const salesHistory = await db.select().from(sales)
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .orderBy(desc(sales.date))
+      .limit(500);
+
+    const totals = new Map<string, number>();
+    for (const sale of salesHistory) {
+      const day = sale.date.toISOString().slice(0, 10);
+      totals.set(day, (totals.get(day) ?? 0) + sale.quantitySold);
+    }
+
+    res.json({
+      sales: salesHistory,
+      daily: Array.from(totals.entries()).map(([date, quantity]) => ({ date, quantity })),
+    });
   });
 
   app.post("/api/sales", async (req: Request, res: Response) => {
-    if (!req.session.user) return res.status(401).json({ message: "Not authenticated" });
-    
+    const actor = req.session.user;
+    if (!actor) return res.status(401).json({ message: "Not authenticated" });
+
     try {
-      // 1. Guardar la venta
-      const saleData = insertSaleSchema.parse({
-        ...req.body,
-        establishment: req.session.user.establishment
-      });
-      
-      const [newSale] = await db.insert(sales).values(saleData).returning();
+      const body = req.body ?? {};
+      const lines = Array.isArray(body.lines)
+        ? saleBatchSchema.parse(body).lines
+        : saleBatchSchema.parse({
+            lines: [{ menuItemId: body.menuItemId, quantitySold: body.quantitySold }],
+          }).lines;
 
-      // 2. 🧙‍♂️ MAGIA: Descontar ingredientes del Inventario
-      if (saleData.menuItemId) {
-        // Buscamos la receta del plato vendido
-        const recipe = await db.select()
-          .from(ingredients)
-          .where(eq(ingredients.menuItemId, saleData.menuItemId));
-
-        // Recorremos cada ingrediente y restamos
-        for (const ing of recipe) {
-          if (ing.inventoryItemId) {
-            // Cantidad a restar = (Lo que lleva el plato * Platos vendidos)
-            const amountUsed = ing.quantity * saleData.quantitySold;
-
-            // Ejecutamos la resta directa en base de datos
-            await db.execute(
-              sql`UPDATE inventory 
-                  SET quantity = quantity - ${amountUsed}, 
-                      last_updated = NOW() 
-                  WHERE id = ${ing.inventoryItemId}`
-            );
+      const created = await db.transaction(async (tx) => {
+        const recorded = [];
+        for (const line of lines) {
+          const [menu] = await tx.select().from(menuItems).where(eq(menuItems.id, line.menuItemId)).limit(1);
+          if (!menu || !canAccessEstablishment(actor, menu.establishment)) {
+            const error = new Error("Menu item not found") as Error & { statusCode: number };
+            error.statusCode = 404;
+            throw error;
           }
-        }
-      }
 
-      res.status(201).json(newSale);
+          const recipe = await tx.select().from(ingredients).where(eq(ingredients.menuItemId, menu.id));
+          for (const ingredient of recipe) {
+            if (!ingredient.inventoryItemId) continue;
+            const [item] = await tx.select().from(inventory).where(eq(inventory.id, ingredient.inventoryItemId)).limit(1);
+            if (!item) {
+              const error = new Error(`Missing inventory for ${ingredient.name}`) as Error & { statusCode: number };
+              error.statusCode = 400;
+              throw error;
+            }
+            const used = convertQuantity(ingredient.quantity * line.quantitySold, ingredient.unit, item.unit ?? "units");
+            if (used === undefined) {
+              const error = new Error(`Cannot convert ${ingredient.unit} to ${item.unit ?? "units"}`) as Error & { statusCode: number };
+              error.statusCode = 400;
+              throw error;
+            }
+            const nextQuantity = Number(item.quantity ?? 0) - used;
+            if (nextQuantity < 0) {
+              const error = new Error(`Not enough ${item.name}`) as Error & { statusCode: number };
+              error.statusCode = 409;
+              throw error;
+            }
+            await tx.update(inventory).set({
+              quantity: nextQuantity,
+              lastUpdated: new Date(),
+              updatedBy: actor.name,
+            }).where(eq(inventory.id, item.id));
+            await tx.insert(inventoryLogs).values({
+              itemName: item.name,
+              change: -used,
+              reason: "Sale",
+              user: actor.name,
+              establishment: item.establishment,
+              inventoryItemId: item.id,
+            });
+          }
+
+          const [sale] = await tx.insert(sales).values({
+            menuItemId: menu.id,
+            quantitySold: line.quantitySold,
+            establishment: menu.establishment,
+          }).returning();
+          recorded.push(sale);
+        }
+        return recorded;
+      });
+
+      res.status(201).json({ sales: created });
     } catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ errors: error.errors });
+      const statusCode = typeof error === "object" && error !== null && "statusCode" in error
+        ? Number((error as { statusCode: number }).statusCode)
+        : 500;
+      if (statusCode >= 400 && statusCode < 500) {
+        const message = error instanceof Error ? error.message : "Failed to record sale";
+        return res.status(statusCode).json({ message });
+      }
       console.error(error);
       res.status(500).json({ message: "Failed to record sale" });
     }
+  });
+
+  app.use("/api", (_req, res) => {
+    res.status(404).json({ message: "Not found" });
   });
 }
