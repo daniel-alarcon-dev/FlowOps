@@ -1,15 +1,16 @@
 import "dotenv/config";
-import crypto from "node:crypto";
-import fs from "node:fs";
 import path from "node:path";
 import pg from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
+import { MIGRATIONS_FOLDER, readMigrationFiles } from "./migration-files";
 
 /**
  * Applies Drizzle migrations only to the dev Neon branch in .env.
  * The old production endpoint is refused even if DATABASE_URL points at it.
- * Production is baselined by hand, outside this script.
+ * A database that already has every app table but no drizzle history is
+ * baselined with only the first journal entry. `migrate` then applies the rest.
+ * Production is baselined by hand with `npm run db:prod-sql`, not this script.
  */
 const BLOCKED_HOSTS = new Set([
   "ep-odd-cloud-agbhx1gu-pooler.c-2.eu-central-1.aws.neon.tech",
@@ -18,8 +19,6 @@ const BLOCKED_HOSTS = new Set([
 const DEV_HOSTS = new Set([
   "ep-dark-dream-ag27hyw0-pooler.c-2.eu-central-1.aws.neon.tech",
 ]);
-
-const MIGRATIONS_FOLDER = path.resolve("migrations");
 
 const APP_TABLES = [
   "users",
@@ -59,27 +58,16 @@ function databaseHost(): string {
   return host;
 }
 
-function migrationEntries(): { hash: string; createdAt: number }[] {
-  const journalPath = path.join(MIGRATIONS_FOLDER, "meta", "_journal.json");
-  const journal = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
-    entries: { tag: string; when: number }[];
-  };
-
-  return journal.entries.map((entry) => {
-    const sqlText = fs.readFileSync(path.join(MIGRATIONS_FOLDER, `${entry.tag}.sql`));
-    return {
-      hash: crypto.createHash("sha256").update(sqlText).digest("hex"),
-      createdAt: entry.when,
-    };
-  });
-}
-
 async function tableExists(client: pg.PoolClient, table: string): Promise<boolean> {
   const result = await client.query("SELECT to_regclass($1) AS name", [`public.${table}`]);
   return result.rows[0]?.name != null;
 }
 
-async function baseline(client: pg.PoolClient): Promise<void> {
+/**
+ * Inserts the first journal entry when drizzle has no history yet.
+ * Later entries stay unapplied so `migrate` runs them.
+ */
+async function baselineFirstMigration(client: pg.PoolClient): Promise<void> {
   await client.query("CREATE SCHEMA IF NOT EXISTS drizzle");
   await client.query(`
     CREATE TABLE IF NOT EXISTS drizzle.__drizzle_migrations (
@@ -92,17 +80,51 @@ async function baseline(client: pg.PoolClient): Promise<void> {
   const existing = await client.query(
     "SELECT created_at FROM drizzle.__drizzle_migrations ORDER BY created_at DESC LIMIT 1",
   );
-  const lastCreatedAt = existing.rows[0]?.created_at;
+  if (existing.rows.length > 0) {
+    return;
+  }
 
-  for (const entry of migrationEntries()) {
-    if (lastCreatedAt != null && Number(lastCreatedAt) >= entry.createdAt) {
-      continue;
-    }
-    await client.query(
-      'INSERT INTO drizzle.__drizzle_migrations ("hash", "created_at") VALUES ($1, $2)',
-      [entry.hash, entry.createdAt],
+  const [first] = readMigrationFiles();
+  if (!first) {
+    throw new Error("Migration journal is empty");
+  }
+
+  await client.query(
+    'INSERT INTO drizzle.__drizzle_migrations ("hash", "created_at") VALUES ($1, $2)',
+    [first.hash, first.createdAt],
+  );
+}
+
+/** Returns true when this call recorded the baseline row. */
+export async function baselineIfUntracked(client: pg.PoolClient): Promise<boolean> {
+  const present: string[] = [];
+  const missing: string[] = [];
+  for (const table of APP_TABLES) {
+    if (await tableExists(client, table)) present.push(table);
+    else missing.push(table);
+  }
+
+  if (present.length > 0 && missing.length > 0) {
+    throw new Error(
+      `Dev database is partial (missing ${missing.join(", ")}). Refusing to migrate or baseline.`,
     );
   }
+
+  const recorded = await client.query(`
+    SELECT to_regclass('drizzle.__drizzle_migrations') AS name
+  `);
+  let recordedCount = 0;
+  if (recorded.rows[0]?.name) {
+    const count = await client.query("SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations");
+    recordedCount = count.rows[0]?.n ?? 0;
+  }
+
+  if (present.length === APP_TABLES.length && recordedCount === 0) {
+    await baselineFirstMigration(client);
+    return true;
+  }
+
+  return false;
 }
 
 async function main(): Promise<void> {
@@ -111,32 +133,10 @@ async function main(): Promise<void> {
   const client = await pool.connect();
 
   try {
-    const present: string[] = [];
-    const missing: string[] = [];
-    for (const table of APP_TABLES) {
-      if (await tableExists(client, table)) present.push(table);
-      else missing.push(table);
-    }
-
-    if (present.length > 0 && missing.length > 0) {
-      throw new Error(
-        `Dev database is partial (missing ${missing.join(", ")}). Refusing to migrate or baseline.`,
-      );
-    }
-
-    const recorded = await client.query(`
-      SELECT to_regclass('drizzle.__drizzle_migrations') AS name
-    `);
-    const migrationsTable = recorded.rows[0]?.name;
-    let recordedCount = 0;
-    if (migrationsTable) {
-      const count = await client.query("SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations");
-      recordedCount = count.rows[0]?.n ?? 0;
-    }
-
-    if (present.length === APP_TABLES.length && recordedCount === 0) {
-      await baseline(client);
-      console.log(`Baselined existing schema on dev host ${host}.`);
+    const baselined = await baselineIfUntracked(client);
+    if (baselined) {
+      const first = readMigrationFiles()[0];
+      console.log(`Baselined existing schema on dev host ${host} with ${first?.tag ?? "the first migration"}.`);
     }
 
     const db = drizzle(pool);
@@ -148,8 +148,15 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : "Migration failed";
-  console.error(message);
-  process.exit(1);
-});
+function isDirectRun(): boolean {
+  const entry = process.argv[1];
+  return entry != null && path.basename(entry) === "db-migrate.ts";
+}
+
+if (isDirectRun()) {
+  main().catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : "Migration failed";
+    console.error(message);
+    process.exit(1);
+  });
+}
