@@ -154,25 +154,12 @@ export default function Inventory({ categoryColor = '#4CAF50' }: { categoryColor
     if (newItemName.trim()) {
       const newQty = parseFloat(newItemQty) || 0;
       
-      // 1. LÓGICA DE REGISTRO (LOGS) 📝
+      // Quantity edits are logged by PATCH /api/inventory/:id. Posting here too duplicated the row.
       if (editingItem) {
           const oldQty = editingItem.quantity || 0;
           const diff = newQty - oldQty;
-
-          // Solo registramos si la cantidad cambió
-          if (diff !== 0) {
-              createLogMutation.mutate({
-                  itemName: newItemName,
-                  change: diff, // Ej: +10 o -5
-                  reason: diff > 0 ? 'Restock' : 'Adjustment', // Razón automática
-                  user: currentUser?.name || 'Unknown User',
-                  date: new Date().toISOString()
-              });
-              
-              if (diff > 0) toast({ title: "Restock Logged", description: `Added +${diff} to logs.` });
-          }
+          if (diff > 0) toast({ title: "Restock Logged", description: `Added +${diff} to logs.` });
       } else {
-          // Si es un ítem nuevo
            createLogMutation.mutate({
               itemName: newItemName,
               change: newQty,

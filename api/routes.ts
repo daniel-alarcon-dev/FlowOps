@@ -420,8 +420,24 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
   });
   
+  const SHORT_ICON_MAX_LENGTH = 16;
+  const HTTPS_ICON_MAX_LENGTH = 2048;
+  const DATA_IMAGE_MAX_LENGTH = 2_000_000;
+
+  const inventoryEmojiSchema = z
+    .string()
+    .trim()
+    .min(1)
+    .max(DATA_IMAGE_MAX_LENGTH)
+    .refine((value) => {
+      const normalized = value.toLowerCase();
+      if (normalized.startsWith("https://")) return value.length <= HTTPS_ICON_MAX_LENGTH;
+      if (normalized.startsWith("data:image/")) return value.length <= DATA_IMAGE_MAX_LENGTH;
+      return value.length <= SHORT_ICON_MAX_LENGTH;
+    }, "Icon must be a short emoji or an https or data:image URL");
+
   const inventoryPatchSchema = z.object({
-    emoji: z.string().trim().min(1).max(16).optional(),
+    emoji: inventoryEmojiSchema.optional(),
     name: z.string().trim().min(1).max(120).optional(),
     category: z.string().trim().max(80).nullable().optional(),
     status: z.enum(["OK", "LOW", "OUT"]).optional(),

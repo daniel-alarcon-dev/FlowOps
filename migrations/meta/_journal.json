@@ -15,6 +15,13 @@
       "when": 1794664593517,
       "tag": "0001_f1_access",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1795309405435,
+      "tag": "0002_equipment_status",
+      "breakpoints": true
     }
   ]
 }

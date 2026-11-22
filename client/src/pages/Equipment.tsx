@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import Layout from '@/components/Layout';
-import { useStore } from '@/lib/store';
+import { useStore, type EquipmentStatus } from '@/lib/store';
 import { useEquipment, useCreateEquipment, useUpdateEquipment, useDeleteEquipment } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -72,7 +72,7 @@ export default function Equipment() {
 
   // --- HANDLERS ---
 
-  const handleStatusChange = (id: string, newStatus: "OPERATIONAL" | "BROKEN" | "MAINTENANCE") => {
+  const handleStatusChange = (id: string, newStatus: EquipmentStatus) => {
       updateMutation.mutate({ id, updates: { status: newStatus } });
   };
 
@@ -120,7 +120,7 @@ export default function Equipment() {
       const data: any = { name, location: category || "General", notes };
       
       if (!editingItem) {
-          data.status = "OPERATIONAL";
+          data.status = "Working";
       }
 
       if (editingItem) updateMutation.mutate({ id: editingItem.id, updates: data });
@@ -139,7 +139,7 @@ export default function Equipment() {
   };
 
   const getFolderAlerts = (folderName: string) => {
-      return equipmentList.filter((i:any) => (i.location || "General") === folderName && i.status !== 'OPERATIONAL').length;
+      return equipmentList.filter((i:any) => (i.location || "General") === folderName && i.status !== 'Working').length;
   };
 
   return (
@@ -193,20 +193,20 @@ export default function Equipment() {
                     // Eliminamos layout animations para que sea sólido como una roca al cambiar estado
                     className={cn(
                         "p-4 rounded-2xl border flex flex-col gap-3 transition-colors relative group bg-card", 
-                        item.status === 'BROKEN' ? "border-red-500/30 bg-red-500/5" : 
-                        item.status === 'MAINTENANCE' ? "border-orange-500/30 bg-orange-500/5" : 
+                        item.status === 'Broken' ? "border-red-500/30 bg-red-500/5" : 
+                        item.status === 'Attention' ? "border-orange-500/30 bg-orange-500/5" : 
                         "border-white/5"
                     )}
                 >
                     <div className="flex items-start gap-4">
                         <div className={cn(
                             "w-12 h-12 rounded-xl flex items-center justify-center shrink-0 text-xl border", 
-                            item.status === 'BROKEN' ? "bg-red-500/10 border-red-500/20 text-red-500" : 
-                            item.status === 'MAINTENANCE' ? "bg-orange-500/10 border-orange-500/20 text-orange-500" : 
+                            item.status === 'Broken' ? "bg-red-500/10 border-red-500/20 text-red-500" : 
+                            item.status === 'Attention' ? "bg-orange-500/10 border-orange-500/20 text-orange-500" : 
                             "bg-green-500/10 border-green-500/20 text-green-500"
                         )}>
-                            {item.status === 'BROKEN' ? <AlertTriangle className="w-6 h-6" /> : 
-                                item.status === 'MAINTENANCE' ? <Wrench className="w-6 h-6" /> : 
+                            {item.status === 'Broken' ? <AlertTriangle className="w-6 h-6" /> : 
+                                item.status === 'Attention' ? <Wrench className="w-6 h-6" /> : 
                                 <CheckCircle2 className="w-6 h-6" />}
                         </div>
                         
@@ -224,14 +224,14 @@ export default function Equipment() {
                     </div>
 
                     <div className="grid grid-cols-3 gap-2 bg-black/20 p-1.5 rounded-xl">
-                        {[
-                            { id: 'OPERATIONAL', label: 'Operational', color: 'bg-green-500 text-black', icon: CheckCircle2 },
-                            { id: 'MAINTENANCE', label: 'Maint.', color: 'bg-orange-500 text-black', icon: Wrench },
-                            { id: 'BROKEN', label: 'Broken', color: 'bg-red-500 text-white', icon: AlertTriangle }
-                        ].map((opt) => (
+                        {([
+                            { id: 'Working', label: 'Operational', color: 'bg-green-500 text-black', icon: CheckCircle2 },
+                            { id: 'Attention', label: 'Maint.', color: 'bg-orange-500 text-black', icon: Wrench },
+                            { id: 'Broken', label: 'Broken', color: 'bg-red-500 text-white', icon: AlertTriangle }
+                        ] as const).map((opt) => (
                             <button
                                 key={opt.id}
-                                onClick={() => handleStatusChange(item.id, opt.id as any)}
+                                onClick={() => handleStatusChange(item.id, opt.id)}
                                 className={cn(
                                     "py-2 rounded-lg text-[10px] font-bold uppercase transition-all flex items-center justify-center gap-1.5",
                                     item.status === opt.id 
