@@ -34,7 +34,7 @@ export async function createApp(): Promise<Express> {
               scriptSrc: ["'self'"],
               styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
               fontSrc: ["'self'", "https://fonts.gstatic.com"],
-              imgSrc: ["'self'", "data:", "blob:"],
+              imgSrc: ["'self'", "data:", "blob:", "https:"],
               connectSrc: ["'self'", "https://*.sentry.io", "https://*.ingest.sentry.io", "https://*.ingest.de.sentry.io"],
               objectSrc: ["'none'"],
               baseUri: ["'self'"],
