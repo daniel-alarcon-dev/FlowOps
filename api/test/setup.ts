@@ -8,7 +8,7 @@ const databaseUrl = fromEnv || (fs.existsSync(urlFile) ? fs.readFileSync(urlFile
 
 if (!databaseUrl) {
   throw new Error(
-    "No test database. Set TEST_DATABASE_URL to a Neon test branch, or run npm test so a local Postgres starts.",
+    "No test database. Set TEST_DATABASE_URL to Postgres on localhost or 127.0.0.1, or run npm test so a local Postgres starts.",
   );
 }
 

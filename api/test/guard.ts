@@ -1,8 +1,5 @@
-/** Dev and the old production endpoint. Tests must never open either one. */
-const BLOCKED_DATABASE_HOSTS = new Set([
-  "ep-odd-cloud-agbhx1gu-pooler.c-2.eu-central-1.aws.neon.tech",
-  "ep-dark-dream-ag27hyw0-pooler.c-2.eu-central-1.aws.neon.tech",
-]);
+/** Tests may open only a local Postgres. Neon and every other host are refused. */
+const ALLOWED_DATABASE_HOSTS = new Set(["localhost", "127.0.0.1"]);
 
 export function assertTestDatabaseUrl(databaseUrl: string): string {
   let host: string;
@@ -12,8 +9,8 @@ export function assertTestDatabaseUrl(databaseUrl: string): string {
     throw new Error("Test database URL is not a valid URL");
   }
 
-  if (BLOCKED_DATABASE_HOSTS.has(host)) {
-    throw new Error(`Refusing to run tests against ${host}`);
+  if (!ALLOWED_DATABASE_HOSTS.has(host)) {
+    throw new Error(`Refusing to run tests against ${host}. Tests only allow localhost and 127.0.0.1`);
   }
 
   return databaseUrl;
